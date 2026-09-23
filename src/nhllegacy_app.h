@@ -860,8 +860,27 @@ class NhllegacyApp : public rex::ReXApp {
     if (const char* s = std::getenv("NHL_PGO_DUMP_AFTER"); s && *s) {
       const unsigned secs = static_cast<unsigned>(std::strtoul(s, nullptr, 10));
       std::thread([secs]() {
-        ::Sleep(secs * 1000u);
+        std::this_thread::sleep_for(std::chrono::seconds(secs));
         std::fprintf(stderr, "[nhl-pgo] auto-dumping profile after %u s\n", secs);
+        __llvm_profile_write_file();
+        rex::ShutdownLogging();
+        nhl::compat::HardExit(0u);
+      }).detach();
+    }
+    // NHL_PGO_DUMP_AFTER_FRAME=<n>: dump at a GUEST FRAME instead of a wall time.
+    // Preferred for scripted capture - the instrumented build runs several times
+    // slower, so a wall-clock deadline may fire before the route even reaches
+    // gameplay, and the profile would then describe menus. The vpad script is
+    // frame-indexed, so a frame deadline lands at the same point in the route
+    // no matter how slow the instrumented build is.
+    if (const char* s = std::getenv("NHL_PGO_DUMP_AFTER_FRAME"); s && *s) {
+      const uint64_t want = std::strtoull(s, nullptr, 10);
+      std::thread([want]() {
+        while (nhl::graphics::ReadVkFrameIndex() < want) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        std::fprintf(stderr, "[nhl-pgo] auto-dumping profile at guest frame %llu\n",
+                     static_cast<unsigned long long>(want));
         __llvm_profile_write_file();
         rex::ShutdownLogging();
         nhl::compat::HardExit(0u);

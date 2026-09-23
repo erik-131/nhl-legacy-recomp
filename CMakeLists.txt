@@ -6,6 +6,22 @@ cmake_minimum_required(VERSION 3.25)
 # C is enabled for the plume shader-embed (.c blobs from plume_file_to_c); CXX is the project.
 project(nhllegacy LANGUAGES C CXX)
 
+# Host CPU tuning for the recompiled guest.
+#
+# The recompiled guest is ~92% of gameplay frame time on macOS (see
+# docs/macos-perf-where-the-time-goes.md), and clang's default target for
+# -arch arm64 is apple-m1. On a newer Apple Silicon part that leaves two ISA
+# generations of scheduling and instruction selection unused for the code that
+# actually dominates the frame.
+#
+# NHLLEGACY_HOST_CPU=<clang -mcpu value> applies it, e.g. apple-m4 or native.
+# Off by default: a binary built with it will not run on older Apple Silicon.
+set(NHLLEGACY_HOST_CPU "" CACHE STRING "clang -mcpu value for the recompiled guest (e.g. apple-m4, native); empty = portable default")
+if(NHLLEGACY_HOST_CPU)
+    add_compile_options(-mcpu=${NHLLEGACY_HOST_CPU})
+    message(STATUS "Host CPU tuning: -mcpu=${NHLLEGACY_HOST_CPU}")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
