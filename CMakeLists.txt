@@ -149,6 +149,27 @@ endif()
 
 rexglue_setup_target(nhllegacy)
 
+# Keep the SDK's bundled fmt headers AHEAD of Homebrew's.
+#
+# Homebrew's Snappy package exports "/opt/homebrew/include" as its interface
+# include directory, and that directory is a symlink farm holding every Homebrew
+# package's headers - including its own fmt (12.2 at the time of writing). The
+# SDK bundles and LINKS a different fmt (12.1, thirdparty/fmt). With Homebrew's
+# directory first on the search path, this target compiled against one fmt's
+# headers and linked the other's library: an ODR violation that only linked
+# because -O3 happened to inline the one symbol that differs
+# (fmt::detail::allocate). The PGO instrumented build inlines less, emitted a
+# real reference, and failed to link - it exposed the bug rather than caused it.
+if(TARGET fmt)
+    get_target_property(_nhl_fmt_inc fmt INTERFACE_INCLUDE_DIRECTORIES)
+    if(_nhl_fmt_inc)
+        target_include_directories(nhllegacy BEFORE PRIVATE ${_nhl_fmt_inc})
+        if(TARGET nhllegacy_recomp)
+            target_include_directories(nhllegacy_recomp BEFORE PRIVATE ${_nhl_fmt_inc})
+        endif()
+    endif()
+endif()
+
 # SPIKE (docs/vulkan-rov-backend-spike-prompt.md): the SDK's Vulkan ROV backend is
 # a COMPILE-TIME option (REXGLUE_USE_VULKAN, OFF in the stock win-amd64 zips). When
 # CMAKE_PREFIX_PATH points at an SDK built with it ON, enable this to compile the
