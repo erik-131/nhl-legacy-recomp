@@ -37,15 +37,49 @@ where macOS frame time is.
 - **#2 pipeline state description short-circuit** (68138c9). 69.0% of draws skip
   `GetCurrentStateDescription`, against a ~70% ceiling.
 
-## Where macOS fps actually has to come from
+## CORRECTION (2026-09-23): the guest is mostly WAITING, not computing
 
-The ~92% is the recompiled guest code - the title's own simulation and command
-generation - not the graphics layer. Relevant existing levers are PGO (plan
-Phase 5) and `-mtune` (plan item #4, currently unset), both of which act on the
-recompiled binary rather than the SDK.
+The section above concluded "the port is guest-CPU bound" because the command
+processor accounts for only ~8% of the frame. That was an inference - the other
+92% was simply *not the command processor*. Two guest-compute optimizations and a
+profile then showed it is largely the guest waiting:
 
-Menus sit at exactly 30.0 fps / 33.3 ms, a hard cap. Gameplay falls to ~19-20,
-so the guest simply cannot produce frames faster.
+| lever on the recompiled guest | gameplay fps | verdict |
+|---|---|---|
+| baseline (`-mcpu=apple-m1` default) | 20.4-20.9 | - |
+| `-mcpu=apple-m4` (`NHLLEGACY_HOST_CPU`) | 20.9 | **null** |
+| PGO (`NHLLEGACY_PGO=use`), interleaved 3 v 3 | 21.30 vs 21.66 baseline | **null** - ranges overlap |
+
+PGO did optimize the code (the binary is 15% smaller) and the frame rate did not
+move. That is what happens when the hot path is waiting.
+
+**The profile says what it waits on.** The single hottest guest function is
+`sub_827E2BC8`, in the title's Xbox 360 D3D runtime. It lowers thread priority
+(`cctpl`), burns cycles with `db16cyc` delay hints, restores priority (`cctpm`),
+then polls a value the GPU writes back - `*(device+11024)` against a target at
+`device+11036`, reached from `sub_827EDAB0`. It is a spin-wait on GPU progress.
+
+- 23.18 billion entries over a 403 s capture, and the "value changed" branch
+  fired ~7.7 million times: the poll finds nothing 99.97% of the time.
+- **85% of the spinning happens in gameplay**, ~11.5 M delay-loop iterations per
+  gameplay frame vs ~2.2 M per menu frame (menus-only capture dumped at frame
+  4900, full capture at 10000).
+- The recompiler emits NOTHING for `db16cyc`/`cctpl`/`cctpm`
+  (`src/codegen/builders/system.cpp`, "no effect in recompiled code" - reasoning
+  written for x86). On Xenon those hand the core to the sibling hardware thread;
+  here the thread spins flat out on a real core.
+
+**What is not yet explained.** The GPU itself finishes quickly - at swap the
+command processor waits only ~0.5 ms for it - and the command processor wakes
+promptly on a write-pointer update (event-signalled, not polled). So the fence is
+slow to arrive for some other reason. Leading hypothesis, UNTESTED: the ring-buffer
+read-pointer writeback the guest polls is only stored after `ExecutePrimaryBuffer`
+finishes an entire pending batch (`CommandProcessor::WorkerThreadMain`), not as
+work progresses, so the guest waits on batch granularity.
+
+**So the lever is fence latency, not codegen.** Further PGO / -mcpu / LTO work on
+the guest is unlikely to pay while this dominates. Menus sit at exactly 30.0 fps,
+a hard cap; gameplay at ~21 is set by how long the guest waits per frame.
 
 ## How to measure (do not use fps)
 
@@ -56,6 +90,14 @@ unavailable on macOS: SDK 0.10.x removed `rex/graphics/trace_protocol.h`, so
 `tools/replay/src/xtr_player_unsupported.cpp` is linked instead of the real
 player, and the SDK ships no trace writer at all (the `trace_gpu_*` cvars are
 inert shims in `src/sdk_cvar_compat.cpp`).
+
+For guest-side changes use `tools/macos/gameplay_bench.sh <build dir> <tag>`:
+wall time over guest frames 6500-8000 (on-ice play, below the 30 fps cap). It
+refuses to report unless the window averaged >1000 draws/frame - an earlier
+"baseline" ran with its input script missing (it lived in /tmp, which was
+cleared), idled on a menu at a flat 30.00 fps, and looked perfectly clean.
+Identical runs still spread ~7%, so interleave builds and require the ranges not
+to overlap.
 
 Use instead: `NHL_DRAW_TIMING=1` (per-draw, per-resolve and per-swap wall time)
 and `REX_CPU_TIMING=1` (nanoseconds in the descriptor path). Per-draw

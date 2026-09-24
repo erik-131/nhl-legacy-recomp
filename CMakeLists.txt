@@ -170,6 +170,48 @@ if(TARGET fmt)
     endif()
 endif()
 
+# Profile-guided optimization of the recompiled guest.
+#
+# NHLLEGACY_PGO=generate  instrument, then run a representative session; the
+#                         profile is flushed by NHL_PGO_DUMP_AFTER_FRAME (see
+#                         src/nhllegacy_app.h) to a .profraw.
+# NHLLEGACY_PGO=use       rebuild guided by NHLLEGACY_PGO_PROFILE, the merged
+#                         .profdata (xcrun llvm-profdata merge -o ... *.profraw).
+#
+# Scoped to the recomp object library and the app, not applied globally. The
+# SDK comes in through add_subdirectory here, so a global -fprofile-generate
+# would instrument every SDK dylib and MoltenVK too, and those shared libraries
+# then fail to link against the profile runtime. The recomp is where ~92% of
+# gameplay frame time goes (docs/macos-perf-where-the-time-goes.md), and keeping
+# the SDK untouched means one build directory can serve both stages: switching
+# generate -> use rebuilds only the recomp and the app.
+set(NHLLEGACY_PGO "" CACHE STRING "Profile-guided optimization stage: empty, generate, or use")
+set(NHLLEGACY_PGO_PROFILE "${CMAKE_SOURCE_DIR}/pgo/nhllegacy.profdata" CACHE FILEPATH "Merged .profdata consumed by NHLLEGACY_PGO=use")
+set(_nhl_pgo_targets nhllegacy)
+if(TARGET nhllegacy_recomp)
+    list(APPEND _nhl_pgo_targets nhllegacy_recomp)
+endif()
+if(NHLLEGACY_PGO STREQUAL "generate")
+    foreach(_t IN LISTS _nhl_pgo_targets)
+        target_compile_options(${_t} PRIVATE -fprofile-generate)
+    endforeach()
+    target_compile_definitions(nhllegacy PRIVATE NHL_PGO_INSTRUMENT)
+    target_link_options(nhllegacy PRIVATE -fprofile-generate)
+    message(STATUS "PGO: instrumenting ${_nhl_pgo_targets}")
+elseif(NHLLEGACY_PGO STREQUAL "use")
+    if(NOT EXISTS "${NHLLEGACY_PGO_PROFILE}")
+        message(FATAL_ERROR "NHLLEGACY_PGO=use but no profile at ${NHLLEGACY_PGO_PROFILE}")
+    endif()
+    foreach(_t IN LISTS _nhl_pgo_targets)
+        target_compile_options(${_t} PRIVATE
+            -fprofile-use=${NHLLEGACY_PGO_PROFILE}
+            -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date)
+    endforeach()
+    message(STATUS "PGO: optimizing ${_nhl_pgo_targets} with ${NHLLEGACY_PGO_PROFILE}")
+elseif(NHLLEGACY_PGO)
+    message(FATAL_ERROR "NHLLEGACY_PGO must be empty, generate or use (got '${NHLLEGACY_PGO}')")
+endif()
+
 # SPIKE (docs/vulkan-rov-backend-spike-prompt.md): the SDK's Vulkan ROV backend is
 # a COMPILE-TIME option (REXGLUE_USE_VULKAN, OFF in the stock win-amd64 zips). When
 # CMAKE_PREFIX_PATH points at an SDK built with it ON, enable this to compile the
