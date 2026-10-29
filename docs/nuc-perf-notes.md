@@ -81,3 +81,28 @@ the CP thread: per-draw cost (5.8 µs vs 2 µs on M4), readback drains, and gues
 Order of work: lazy readback write-back → Simpsons host-RT correctness → CP per-draw cost.
 Also seen: "Audio Worker" thread ~75 % of a core in every run (looks like a busy-wait). CT 105 needed 16 GB
 (8 GB thrashed swap and hung a run).
+
+## CP profile + guest vsync finding — 2026-10-29 afternoon (bench v8, Frigate on)
+New diag switches: `REX_CP_IDLE_STATS`, `REX_CP_PROFILE` (exclusive wall time per PM4 type-3 opcode +
+CP-thread CPU), `REX_WRM_TRACE` (per-address WAIT_REG_MEM stats + PM4 packet history around long waits),
+fence-wait caller histogram in `NHL_FENCE_SPIN_STATS`.
+
+| run | fps | top CP cost |
+|---|---|---|
+| rtv + readback=some | 33.0 | WAIT_REG_MEM 38 % (~12 ms/frame), DRAW_INDX 35 % (6.7 µs/draw); CP never idle, 1–4 % GPU-blocked |
+| rtv + `NHL_VK_RB_MAX_PER_DEST=2` (readback full) | 32.3 | same as above — per-dest limit removes the drain cost |
+| fsi (default) | 10.6 | XE_SWAP 71 % (~66 ms/frame waiting for the GPU) — fsi is GPU-bound |
+| rtv + some + **`NHL_SWAP_INTERVAL=0`** | **43.8** | DRAW_INDX_2 49 % (frame-slot fence waits inside), CP 47 % GPU-blocked → now GPU-bound |
+| fsi + `NHL_SWAP_INTERVAL=0` | 9.7 | XE_SWAP 82 % (~85 ms) — unchanged, GPU-bound |
+
+Root cause of the rtv ~30 fps ceiling: the guest D3D uses presentation interval 1. The GPU stream sets
+scratch1=1, raises a CP interrupt that runs the swap callback `sub_827F0D88(arg=0x100)`, then
+WAIT_REG_MEM until scratch1==0. With interval 1 the callback defers the flip (and so the CP) to the next
+vblank, so ~20 ms CP frames quantize to 33 ms. The guest's once-per-frame wait (caller 827F2394 in
+Present `sub_827F1C88`, ~23 ms) waits for the previous frame's fence. Hook `NHL_SWAP_INTERVAL=0`
+(src/diag_hooks.cpp) forces an immediate flip. Game-speed effect not yet verified.
+Note: with the vsync cvar on (normal play) WAIT_REG_MEM sleeps wait/0x100 ms per failed poll.
+
+Conclusion: both paths are now GPU-bound on the Arc iGPU (rtv ~22 ms, fsi ~70–85 ms per frame). Next:
+GPU timestamp profiling to see which GPU work dominates (draw shaders, texture loads, resolves), and the
+Simpsons-style host-RT port for a correct, cheap EDRAM path.
