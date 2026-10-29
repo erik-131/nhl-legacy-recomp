@@ -1134,3 +1134,37 @@ static const int g_palette_dump_timer = [] {
   }).detach();
   return 0;
 }();
+
+// --- NHL_FENCE_SPIN_STATS=1: wall time the guest spends in the D3D fence wait --------
+// sub_827EDAB0 blocks until *(*(device+11024)) (CP scratch writeback) passes the fence
+// in r4, spinning through sub_827E2BC8 (db16cyc delay loop, a no-op when recompiled).
+// Logs once per second how many ms the calling threads spent inside it, so we can
+// tell "guest CPU-bound" from "guest waiting on the command processor".
+REX_EXTERN(__imp__sub_827EDAB0);
+extern "C" REX_FUNC(sub_827EDAB0) {
+  static const bool on = [] {
+    const char* e = std::getenv("NHL_FENCE_SPIN_STATS");
+    return e && *e && *e != '0';
+  }();
+  if (!on) {
+    __imp__sub_827EDAB0(ctx, base);
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  __imp__sub_827EDAB0(ctx, base);
+  const auto t1 = std::chrono::steady_clock::now();
+  static std::atomic<uint64_t> ns{0}, calls{0};
+  static std::atomic<int64_t> window_start{0};
+  ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  ++calls;
+  const int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1.time_since_epoch()).count();
+  int64_t ws = window_start.load();
+  if (ws == 0) {
+    window_start.compare_exchange_strong(ws, now_ms);
+  } else if (now_ms - ws >= 1000 && window_start.compare_exchange_strong(ws, now_ms)) {
+    const uint64_t n = ns.exchange(0), c = calls.exchange(0);
+    REXLOG_INFO("[nhl-fencespin] window={} ms calls={} in_wait={:.1f} ms ({:.0f}%)",
+                now_ms - ws, c, n / 1e6, 100.0 * (n / 1e6) / double(now_ms - ws));
+  }
+}

@@ -10,7 +10,8 @@ docker exec "$C" pkill -x nhllegacy.exe; docker exec "$C" pkill -x nhllegacy; sl
 BEFORE=$(ls $B/logs/*.log 2>/dev/null | wc -l)
 START=$(date +%s)
 docker exec -d -u retro -w /home/retro/nhl-linux "$C" env NHL_NO_SETUP_UI=1 REX_FENCE_WAIT_STATS=1 NHL_VK_NO_VSYNC=1 NHL_VPAD_SCRIPT='76:start:150,80:a:150,83:a:150,86:a:150,89:a:150,92:a:150,95:a:150,98:a:150,101:a:150,104:a:150,107:a:150,110:a:150,113:a:150,116:a:150,119:a:150,122:a:150,125:a:150,128:a:150,131:a:150,134:a:150,137:a:150,140:a:150,143:a:150,146:a:150,149:a:150,152:a:150,155:a:150,158:a:150,161:a:150,164:a:150,169:start:150,173:start:150,177:start:150' NHL_SHOT_AFTER_SEC=230,270 $EXTRA ./nhllegacy
-while [ $(( $(date +%s)-START )) -lt $DUR ]; do sleep 5; docker exec "$C" pgrep -x nhllegacy >/dev/null || break; done
+while [ $(( $(date +%s)-START )) -lt $DUR ]; do sleep 5; docker exec "$C" pgrep -x nhllegacy >/dev/null || break
+  E=$(( $(date +%s)-START )); if [ $E -ge 240 ] && [ ! -f $OUT/$TAG.threads ]; then P=$(pgrep -x nhllegacy | head -1); top -H -b -d 2 -n 2 -p $P | awk '/^top/{n++} n==2' | head -22 > $OUT/$TAG.threads; fi; done
 ALIVE=$(docker exec "$C" pgrep -x nhllegacy >/dev/null && echo ja || echo NEI)
 docker exec "$C" pkill -x nhllegacy; sleep 1
 L=$(ls -t $B/logs/*.log 2>/dev/null | head -1)
@@ -45,6 +46,6 @@ for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
     sel=[l for l in lines if tag in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
     for l in sel[:3]: print(l.split('] ')[-1])
 PY
-ls -la $B/shot_*.png 2>/dev/null | awk '{print $5, $NF}'
+echo "--- tråder (top -H, 2s snitt):"; cat $OUT/$TAG.threads 2>/dev/null; ls -la $B/shot_*.png 2>/dev/null | awk '{print $5, $NF}'
 } > $OUT/$TAG.txt 2>&1
 cat $OUT/$TAG.txt
