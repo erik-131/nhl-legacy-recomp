@@ -106,3 +106,17 @@ Note: with the vsync cvar on (normal play) WAIT_REG_MEM sleeps wait/0x100 ms per
 Conclusion: both paths are now GPU-bound on the Arc iGPU (rtv ~22 ms, fsi ~70–85 ms per frame). Next:
 GPU timestamp profiling to see which GPU work dominates (draw shaders, texture loads, resolves), and the
 Simpsons-style host-RT port for a correct, cheap EDRAM path.
+
+## GPU timestamp profile (REX_GPU_PROF, interval 0) — 2026-10-29 16:00
+Timestamps at every category switch (~5 per draw) serialize the GPU somewhat (rtv 43.8 → 35.4 fps,
+fsi 9.7 → 8.1 fps under the profiler), so read the split as relative, not absolute.
+
+| path | GPU busy/frame | draw | rt update | resolve | upload | tex |
+|---|---|---|---|---|---|---|
+| rtv | 27.7 ms (98 %) | 14.5 ms (52 %) | 5.6 ms | 2.9 ms | 2.3 ms | 1.3 ms |
+| fsi | 108 ms (87 %) | 102 ms (95 %) | 0.05 ms | 1.2 ms | 2.1 ms | 1.1 ms |
+
+Conclusion: the fsi cost is the draws themselves — the fragment-shader-interlock EDRAM emulation in the
+pixel shaders is ~7x the rtv draw cost on Arc. Texture loads, resolves and uploads are small. The way to
+60 fps on this iGPU is a correct host-RT path (find why rtv renders the 3D scene black, or port the
+Simpsons-style native host-RT path), not CPU-side work.
