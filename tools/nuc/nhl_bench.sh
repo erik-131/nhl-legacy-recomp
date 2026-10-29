@@ -41,6 +41,9 @@ if bl: print(f"CP blokkert i vinduet: snitt {sum(bl)/len(bl):.0f}%")
 for l in fw:
     ts=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()
     if t0<=ts<=t0+6: print(l.split('] ')[-1])
+for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
+    sel=[l for l in lines if tag in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+    for l in sel[:3]: print(l.split('] ')[-1])
 PY
 ls -la $B/shot_*.png 2>/dev/null | awk '{print $5, $NF}'
 } > $OUT/$TAG.txt 2>&1

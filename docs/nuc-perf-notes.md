@@ -57,3 +57,16 @@ finish the frame (~55–120 ms) — so the GPU needs roughly 60+ ms per gameplay
 (~35–40 ms) cannot overlap it because of the drain. To reach 16.7 ms the GPU side must get ~4x
 cheaper (FSI/EDRAM emulation → host render targets, cf. The Simpsons Game recomp), and the drain
 must stop serialising CP and GPU (lazy write-back).
+
+## Clean control runs (Frigate stopped, Wolf session 1920x1080, no client attached) — bench v4
+| run | ms/frame | fps | CP thread |
+|---|---|---|---|
+| fsi baseline | 96.6 | 10.4 | 67 % blocked, 11–13 readback drains/s |
+| fsi + `NHL_VK_READBACK_MODE=some` | 72.5 | 13.8 | 69 % blocked, all frame-slot waits (GPU-bound) |
+| `NHL_VK_RT_PATH=rtv` (3D renders black) | 40.9 | 24.4 | 27 % blocked, ~25 short drains/s |
+
+Contention from Frigate + the old 4K session was only ~10 %. On fsi the GPU needs ~70 ms per gameplay
+frame. With host RTs the GPU cost drops sharply and the CP thread (~30 ms/frame of non-blocked work at
+~1800 draws) becomes the limit. 60 fps therefore needs both a *correct* host-RT path (Simpsons-style)
+and roughly halving CP-thread cost. Note: a Moonlight client with a real controller makes the vpad
+player 2 and the run stalls on the gamer-profile sign-in dialog — run benchmarks with no client attached.
