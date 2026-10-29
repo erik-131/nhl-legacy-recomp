@@ -32,3 +32,9 @@ packet; the CP thread in turn blocks on GPU fences. `sdk/rexglue-rptr-incrementa
   (rexglue c94f5eb + the patches above), libsnappy-dev.
 - `rexglue codegen nhllegacy_manifest.toml` with the vanilla xex
   (sha256 d818eb15775c1fee34b057b0fc494b211535d07123230ee45bd7d40991c55624) in `game/`: 12 min, 725 files, 384 MB.
+- Full game build on 2 cores: ~37 min compile + ~1.5 min lld link (`--ld-path=/usr/bin/ld.lld-20`).
+  Output: `nhllegacy` (212 MB, 114 MB stripped) + `librexruntime.so` + `librexgpu-xenos.so`
+  (from `third_party/rexglue-sdk-main/out/linux-amd64/`), RUNPATH `$ORIGIN`, needs `libsnappy.so.1`.
+- Smoke test under Xvfb + llvmpipe: boots, Vulkan device up, presents frames, stops on missing game data (expected).
+- Deploy to NUC: `nhl-linux/` next to the Windows install in the Wolf Steam home, `game -> ../nhl/game`,
+  added as a native (no Proton) non-Steam shortcut.
