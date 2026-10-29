@@ -338,7 +338,8 @@ target_include_directories(nhllegacy PRIVATE
     "${REXSDK_DIR}/thirdparty/imgui"
     "${REXSDK_DIR}/thirdparty/glslang"
     "${REXSDK_DIR}/thirdparty/xxHash"
-    "${REXSDK_DIR}/thirdparty/sdl3/include")
+    "${REXSDK_DIR}/thirdparty/sdl3/include"
+    "${REXSDK_DIR}/thirdparty/renderdoc")
 
 # snappy, for .xtr trace decompression in tools/replay. The Windows build links
 # the SDK's prebuilt snappy*.lib, but SDK 0.10.x no longer ships snappy at all,

@@ -11,8 +11,12 @@
 
 #ifndef _WIN32
 
+#if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#else
+#include <cstdio>
+#endif
 #include <unistd.h>
 
 #include <chrono>
@@ -38,6 +42,44 @@ struct MEMORY_BASIC_INFORMATION {
 
 // Returns sizeof(*out) on success, 0 on failure — matching Win32 so the callers'
 // `if (!VirtualQuery(...)) break;` idiom terminates their walks correctly.
+#if !defined(__APPLE__)
+// Linux: answer from /proc/self/maps (same contract as the mach path below).
+inline std::size_t VirtualQuery(const void* address, MEMORY_BASIC_INFORMATION* out,
+                                std::size_t length) {
+  if (!out || length < sizeof(*out)) return 0;
+  const uintptr_t query = reinterpret_cast<uintptr_t>(address);
+  FILE* f = std::fopen("/proc/self/maps", "r");
+  if (!f) return 0;
+  uintptr_t next_start = UINTPTR_MAX;
+  bool found = false;
+  char line[512];
+  while (std::fgets(line, sizeof(line), f)) {
+    unsigned long lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3) continue;
+    if (query >= lo && query < hi) {
+      *out = MEMORY_BASIC_INFORMATION{};
+      out->BaseAddress = reinterpret_cast<void*>(lo);
+      out->AllocationBase = out->BaseAddress;
+      out->RegionSize = static_cast<std::size_t>(hi - lo);
+      out->State = MEM_COMMIT;
+      out->Protect = (perms[0] == 'r') ? PAGE_READWRITE : PAGE_NOACCESS;
+      found = true;
+      break;
+    }
+    if (lo > query && lo < next_start) next_start = lo;
+  }
+  std::fclose(f);
+  if (found) return sizeof(*out);
+  if (next_start == UINTPTR_MAX) return 0;
+  *out = MEMORY_BASIC_INFORMATION{};
+  out->BaseAddress = const_cast<void*>(address);
+  out->RegionSize = static_cast<std::size_t>(next_start - query);
+  out->State = MEM_FREE;
+  out->Protect = PAGE_NOACCESS;
+  return sizeof(*out);
+}
+#else
 inline std::size_t VirtualQuery(const void* address, MEMORY_BASIC_INFORMATION* out,
                                 std::size_t length) {
   if (!out || length < sizeof(*out)) return 0;
@@ -74,6 +116,7 @@ inline std::size_t VirtualQuery(const void* address, MEMORY_BASIC_INFORMATION* o
   out->Protect = (info.protection & VM_PROT_READ) ? PAGE_READWRITE : PAGE_NOACCESS;
   return sizeof(*out);
 }
+#endif  // __APPLE__
 
 inline void Sleep(unsigned long milliseconds) {
   ::usleep(static_cast<useconds_t>(milliseconds) * 1000u);

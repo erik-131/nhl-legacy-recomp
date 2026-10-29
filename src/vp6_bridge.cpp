@@ -25,6 +25,7 @@
 #include "vp6_bridge.h"
 
 #include <atomic>
+#include <cstdarg>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
