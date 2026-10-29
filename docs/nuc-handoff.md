@@ -1,30 +1,65 @@
 # Handoff — NUC 60 fps work (resume here)
 
 Goal: stable 60 fps in gameplay on the NUC (Core Ultra 5 225H / Arc iGPU, Proxmox CT 105 =
-Games on Whales, 192.168.0.22) with the Linux build from branch `nuc-perf` of erik-131/nhl-legacy-recomp.
+Games on Whales/Wolf, 192.168.0.22, 16 GB RAM) with the Linux build from branch `nuc-perf` of
+erik-131/nhl-legacy-recomp. All measurements: `docs/nuc-perf-notes.md`.
 
-## Where things are
-- Build env (cloud session): clang-20, `third_party/rexglue-sdk-main` = rexglue c94f5eb + `sdk/rexglue-macos-fsi-tiling-fixes.patch`
-  + `sdk/rexglue-rptr-incremental.patch` + `sdk/rexglue-fence-wait-stats.patch` (local SDK branch `nhl-nuc`).
-  Codegen needs the user's vanilla `default.xex` in `game/` (sha256 d818eb15…, copy from the user's PC `Downloads\nhl\game`).
-  Configure: `cmake -S . -B out/linux-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20
-  -DCMAKE_C_FLAGS=-march=x86-64-v3 -DCMAKE_CXX_FLAGS=-march=x86-64-v3 -DREXSDK_DIR=$PWD/third_party/rexglue-sdk-main -DREXGLUE_ENABLE_TRACY=OFF
-  -DCMAKE_EXE_LINKER_FLAGS=--ld-path=/usr/bin/ld.lld-20 -DCMAKE_SHARED_LINKER_FLAGS=--ld-path=/usr/bin/ld.lld-20` (needs libsnappy-dev, X11/xcb dev pkgs).
-  Full build ~37 min on 2 cores. SDK-only changes rebuild `librexgpu-xenos.so` (runtime-loaded plugin) without relinking the game.
-- Package: `nhl-linux/` = stripped `nhllegacy` + `librexruntime.so` + `librexgpu-xenos.so` + `libsnappy.so.1` + ini, tar.xz (~26 MB).
-- Deploy: put `nhl-linux.tar.xz` in the user's `Downloads\nhl`, run `nhl_auto_install.bat` (ssh key `%USERPROFILE%\.ssh\nhl_nuc`
-  → root@192.168.0.22, from="192.168.0.85"). Installs to `/etc/wolf/profile-data/user/WolfSteam/nhl-linux` (game -> ../nhl/game).
-- Remote commands: write `nhl_cmd.sh` into `Downloads\nhl` (stage under a NEW unique filename each time — the commit tool caches by
-  staged path), double-click `nhl_cmd.bat` in Explorer (computer use), read `nhl_cmd.log`. `nhl_get.bat` pulls `shot_230s/270s.png`.
-- Benchmark: `/root/nhlbench/nhl_bench.sh <tag> [env]` (= `tools/nuc/nhl_bench.sh`). Needs a running Wolf Steam session with NO
-  Moonlight client attached (a client's controller makes the vpad player 2 → stuck on sign-in dialog). ~5 min/run, results in
-  `/root/nhlbench/last_run.out`. Verify gameplay via screenshots.
+## Setup (as of 2026-10-29 evening)
+- CT 105 is being converted to an **unprivileged** LXC in place, and from now on Claude Code runs
+  **inside CT 105**. One-time setup there: `bash tools/nuc/ct105/setup.sh` (toolchain, Claude Code, repo in
+  `/opt/nhl/nhl-legacy-recomp`, SDK = rexglue c94f5eb + `sdk/rexglue-nhl-nuc-combined.patch`, default.xex
+  from the game install, bench script to `/root/nhlbench/`). Agent rules: `tools/nuc/ct105/CLAUDE.md`
+  (copied to `CLAUDE.local.md`). Build/deploy: `tools/nuc/ct105/build.sh [--deploy]`.
+- Game install (never in git): `/etc/wolf/profile-data/user/WolfSteam/nhl` (Windows install, `game/`);
+  Linux build dir `.../WolfSteam/nhl-linux` (`nhllegacy`, `librexruntime.so`, `librexgpu-xenos.so`,
+  `game -> ../nhl/game`, `logs/`). Steam shortcut "nhllegacy.exe" lives in the Wolf Steam profile.
+- Older paths (still valid as fallback): cloud session + Windows PC bats in `Downloads\nhl`
+  (`nhl_cmd.bat` runs `nhl_cmd.sh` over ssh key `nhl_nuc`, `nhl_upload.bat`, `nhl_get.bat`, `nhl_backup.bat`);
+  build-CT + gate design in `tools/nuc/buildct/` (option C, superseded by running in CT 105).
+- After the conversion check: `/dev/dri/renderD128` + render gid, `/dev/uinput` + `/dev/uhid` (virtual
+  gamepad for the bench route), `nesting=1,keyctl=1`, docker works, Wolf session starts.
 
-## Findings so far (clean runs, see docs/nuc-perf-notes.md)
-fsi 96.6 ms (10.4 fps, GPU ~70 ms/frame) · fsi+readback=some 72.5 ms (GPU-bound) · rtv 40.9 ms (3D black; CP thread ~30 ms/frame limits).
+## Benchmark
+`/root/nhlbench/nhl_bench.sh <tag> "<env>"` (= `tools/nuc/nhl_bench.sh`, v9). Time-based vpad route reaches
+gameplay ~178 s after the first fps line; window = 60 s of gameplay; screenshots at 230/270 s. Needs a Wolf
+Steam session started once via Moonlight (Wolf UI → User → Steam → Start), then the client disconnected with
+ctrl+alt+shift+q so the session stays. Aborts if MemAvailable < 4 GB; memory per run logged in `mem.log`.
+The CT hung twice today with memory "used" growing ~0.6–1.7 GB per run — watch `mem.log`.
+
+## Key findings (2026-10-29)
+1. Guest game logic costs only ~9 ms/frame; the guest spends 70–92 % waiting on the GPU path.
+2. **fsi (correct image) is GPU-bound**: ~70–100 ms GPU per frame, 95 % of it in the draws themselves
+   (fragment-shader-interlock EDRAM emulation ~7x the rtv draw cost on Arc). Texture loads, resolves and
+   uploads are ~4 ms total. CPU-side work cannot fix fsi.
+3. **Guest vsync quantization**: D3D presentation interval 1 makes the GPU stream wait for the next vblank
+   in the swap callback `sub_827F0D88` (CP interrupt + WAIT_REG_MEM on scratch1). ~20 ms CP frames got
+   quantized to 33 ms. Hook `NHL_SWAP_INTERVAL=0` (src/diag_hooks.cpp) → rtv 33 → 43.8 fps. Game-speed
+   side effect not verified yet.
+4. rtv (host render targets) + `NHL_VK_READBACK_MODE=some` + interval 0 = 43.8 fps, now GPU-bound (~22–28 ms
+   GPU/frame: draws 52 %, RT updates 20 %, resolves 10 %). But **rtv renders the 3D scene black**.
+5. rtv black-3D investigation (`REX_RESOLVE_LOG_AT=230`): an rtv frame has 13 resolves vs 24 in fsi; the
+   3D pass depth resolve is nearly empty and the final resolve nearly black → the 3D draws do not rasterize
+   in rtv. Not caused by native 2x MSAA (`REX_NATIVE_2X_MSAA=false`) or stencil export
+   (`REX_NATIVE_STENCIL_VALUE_OUTPUT=false`). Draw-state runs logged in `/root/nhlbench/runs-fsi.txt` and
+   `runs-rtv.txt` (lines `draws xN rp=… surf=… depth=… dctl=… cmask=… win_off=… sc_mode=…`) — diff them next.
+   3D pass: surf=0A010280 (pitch 640, 2x MSAA), depth base 0x168/0x2E0, predicated tiling in two 640-wide
+   halves (window offset 0 and -640).
+6. Readback: per-destination limit (`NHL_VK_RB_MAX_PER_DEST=2`) is as fast as `readback=some`; note `some`
+   effectively never copies after the first miss.
+7. With the vsync cvar on (normal play, no `NHL_VK_NO_VSYNC`), CP WAIT_REG_MEM sleeps ≥1 ms per failed poll.
+8. Audio Worker thread burns ~75 % of a core (busy-wait) in every run.
+
+## Diagnostic switches (all env)
+`REX_FENCE_WAIT_STATS`, `NHL_FENCE_SPIN_STATS` (guest fence wait + caller histogram), `REX_CP_IDLE_STATS`,
+`REX_CP_PROFILE` (per-PM4-opcode CP time), `REX_WRM_TRACE` (WAIT_REG_MEM per address + packet history),
+`REX_GPU_PROF` (GPU timestamps per category), `REX_RESOLVE_LOG_AT=<s>` (one frame of resolves + draw state;
+forces sync readback for that frame), `NHL_VK_RB_TRACE`, `NHL_VK_RB_MAX_PER_DEST`, `NHL_SWAP_INTERVAL`,
+`NHL_VK_RT_PATH=fsi|rtv`, `NHL_VK_READBACK_MODE=full|fast|some|none`, any cvar via `REX_<NAME>=value`.
 
 ## Next steps
-1. `NHL_DRAW_TIMING=1` runs (timing-base / timing-rtv) → where the ~30 ms CP time goes (Redth: 2 µs/draw on M4).
-2. Port The Simpsons Game recomp's Vulkan host-RT ("native_*") path (YesterMester/TheSimpsonsGameRecomp tools/rexglue-sdk)
-   onto our SDK so rtv renders correctly; then lazy readback write-back.
-3. CP-thread cost reduction to < ~14 ms/frame.
+1. Diff draw-state runs fsi vs rtv → find why 3D draws don't rasterize in rtv; fix in the Vulkan host-RT path.
+   Reference for a working host-RT path: The Simpsons Game recomp's `tools/rexglue-sdk` (`native_*` cvars;
+   their notes: `simpsons/re/native_renderer_plan.md`).
+2. Once rtv is correct: get GPU time < 16.7 ms (rtv draws ~14 ms, RT updates ~5 ms under the profiler).
+3. Verify game speed with `NHL_SWAP_INTERVAL=0`; consider host-paced presentation.
+4. Then CP-thread cost (~4–7 µs/draw) and the Audio Worker spin.

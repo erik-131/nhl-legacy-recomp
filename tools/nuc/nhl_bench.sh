@@ -1,10 +1,13 @@
 #!/bin/bash
-# v4: tidsstyrt rute (sekunder), malevindu funnet i loggen (>1000 draws/frame), skjermbilder ved 230 og 270 s.
+# v9: minnevern (MIN_AVAIL_MB, mem.log). v4: tidsstyrt rute (sekunder), malevindu funnet i loggen (>1000 draws/frame), skjermbilder ved 230 og 270 s.
 # Bruk: nhl_bench.sh <tag> [ekstra env]   (krever aktiv Wolf Steam-okt)
 TAG=${1:-run}; EXTRA="${2:-}"; DUR=${DUR:-285}
 W=/etc/wolf/profile-data/user/WolfSteam; B=$W/nhl-linux; OUT=/root/nhlbench; mkdir -p $OUT
 C=$(docker ps --format '{{.Names}}' | grep -i steam | head -1)
 [ -z "$C" ] && { echo "Ingen Steam-container (Moonlight-okt mangler)" | tee $OUT/$TAG.txt; exit 1; }
+AV=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+[ "$AV" -lt "${MIN_AVAIL_MB:-4000}" ] && { echo "Avbrutt: bare ${AV} MB tilgjengelig minne (< ${MIN_AVAIL_MB:-4000})" | tee $OUT/$TAG.txt; exit 1; }
+echo "$(date +%T) $TAG start avail=${AV}MB" >> $OUT/mem.log
 rm -f $B/shot_*.png $B/frame_*.png $B/core.*
 docker exec "$C" pkill -x nhllegacy.exe; docker exec "$C" pkill -x nhllegacy; sleep 2
 BEFORE=$(ls $B/logs/*.log 2>/dev/null | wc -l)
@@ -13,7 +16,9 @@ docker exec -d -u retro -w /home/retro/nhl-linux "$C" env NHL_NO_SETUP_UI=1 REX_
 while [ $(( $(date +%s)-START )) -lt $DUR ]; do sleep 5; docker exec "$C" pgrep -x nhllegacy >/dev/null || break
   E=$(( $(date +%s)-START )); if [ $E -ge 240 ] && [ ! -f $OUT/$TAG.threads ]; then P=$(pgrep -x nhllegacy | head -1); top -H -b -d 2 -n 2 -p $P | awk '/^top/{n++} n==2' | head -22 > $OUT/$TAG.threads; fi; done
 ALIVE=$(docker exec "$C" pgrep -x nhllegacy >/dev/null && echo ja || echo NEI)
-docker exec "$C" pkill -x nhllegacy; sleep 1
+docker exec "$C" pkill -x nhllegacy; sleep 3
+docker exec "$C" pkill -9 -x nhllegacy 2>/dev/null; sleep 1
+echo "$(date +%T) $TAG end avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)MB shm=$(du -sm /dev/shm | cut -f1)MB" >> $OUT/mem.log
 L=$(ls -t $B/logs/*.log 2>/dev/null | head -1)
 {
 echo "tag=$TAG extra=$EXTRA start=$(date -d @$START '+%H:%M:%S') varighet=$(( $(date +%s)-START ))s levde=$ALIVE log=$L"

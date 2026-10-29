@@ -34,3 +34,8 @@ Everything in git (branch `nuc-perf`) is safe. What only exists on CT 105 and mu
   `REX_NATIVE_2X_MSAA=false` and `REX_NATIVE_STENCIL_VALUE_OUTPUT=false` did not change it.
   Next: diff the `draws x N rp=… surf=… dctl=…` runs between `runs-fsi.txt` and `runs-rtv.txt`.
 - CT 105 hung twice; memory "used" grew ~0.6–1.7 GB per bench run. Check `mem_after_rtv.txt`.
+
+## Update 17:50 — CT 105 is converted in place
+Erik converts CT 105 itself (backup → restore as unprivileged), so data stays where it is; only ownership is
+remapped by pct. Re-check device passthrough (step 5), keys (step 3/4) and run `tools/nuc/ct105/setup.sh` —
+Claude Code will run inside CT 105 from now on (see `docs/nuc-handoff.md`).

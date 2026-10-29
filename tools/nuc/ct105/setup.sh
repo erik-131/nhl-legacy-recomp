@@ -1,0 +1,37 @@
+#!/bin/bash
+# One-time setup for running Claude Code + builds directly inside CT 105 (Games on Whales).
+# Usage (as root in CT 105): bash setup.sh   -> repo in /opt/nhl/nhl-legacy-recomp
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq git curl ca-certificates xz-utils python3 cmake ninja-build pkg-config \
+  clang-20 lld-20 llvm-20 libvulkan-dev glslang-tools spirv-tools libsnappy-dev \
+  libx11-dev libx11-xcb-dev libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev \
+  libxkbcommon-dev libwayland-dev libasound2-dev libpulse-dev libgtk-3-dev libudev-dev libdbus-1-dev \
+  libgl-dev libegl-dev libdrm-dev libgbm-dev libibus-1.0-dev libpipewire-0.3-dev libjack-dev libsndio-dev libusb-1.0-0-dev nasm
+if ! command -v claude >/dev/null; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  apt-get install -y -qq nodejs
+  npm install -g @anthropic-ai/claude-code
+fi
+mkdir -p /opt/nhl && cd /opt/nhl
+[ -d nhl-legacy-recomp ] || git clone -b nuc-perf https://github.com/erik-131/nhl-legacy-recomp.git
+cd nhl-legacy-recomp
+SDK=third_party/rexglue-sdk-main
+if [ ! -d $SDK/.git ]; then
+  git clone https://github.com/rexglue/rexglue-sdk.git $SDK
+  git -C $SDK checkout -q c94f5eb
+  git -C $SDK submodule update --init --recursive --jobs 8
+  git -C $SDK checkout -q -b nhl-nuc
+  git -C $SDK apply --index "$PWD/sdk/rexglue-nhl-nuc-combined.patch"
+  git -C $SDK -c user.name=nhl -c user.email=nhl@localhost commit -qm "NHL NUC: Redth FSI/tiling fixes + all NUC diagnostics (sdk/rexglue-nhl-nuc-combined.patch)"
+  grep -qx "third_party/rexglue-sdk-main" .git/info/exclude || echo "third_party/rexglue-sdk-main" >> .git/info/exclude
+fi
+# Vanilla xex for codegen comes from the game install on this CT (never commit it).
+mkdir -p game
+[ -f game/default.xex ] || cp /etc/wolf/profile-data/user/WolfSteam/nhl/game/default.xex game/
+echo "d818eb15775c1fee34b057b0fc494b211535d07123230ee45bd7d40991c55624  game/default.xex" | sha256sum -c -
+mkdir -p /root/nhlbench && cp tools/nuc/nhl_bench.sh /root/nhlbench/ && chmod +x /root/nhlbench/nhl_bench.sh
+cp tools/nuc/ct105/CLAUDE.md CLAUDE.local.md
+grep -qx "CLAUDE.local.md" .git/info/exclude || echo "CLAUDE.local.md" >> .git/info/exclude
+echo "OK. Build: tools/nuc/ct105/build.sh [--deploy]; start Claude Code here: cd /opt/nhl/nhl-legacy-recomp && claude"
