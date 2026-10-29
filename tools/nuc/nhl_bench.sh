@@ -42,6 +42,18 @@ if bl: print(f"CP blokkert i vinduet: snitt {sum(bl)/len(bl):.0f}%")
 for l in fw:
     ts=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()
     if t0<=ts<=t0+6: print(l.split('] ')[-1])
+fs=[l for l in lines if 'nhl-fencespin' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+if fs:
+    pc=[float(re.search(r'\((\d+)%\)',l)[1]) for l in fs]
+    print(f"guest i fence-wait: snitt {sum(pc)/len(pc):.0f}% av veggtid ({len(fs)} vinduer)")
+    for l in fs[:3]: print(l.split('] ')[-1])
+ci=[l for l in lines if 'nhl-cpidle' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+if ci:
+    pc=[float(re.search(r'\((\d+)%\)',l)[1]) for l in ci]
+    print(f"CP tom for kommandoer: snitt {sum(pc)/len(pc):.0f}% av veggtid")
+    for l in ci[:2]: print(l.split('] ')[-1])
+rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
     sel=[l for l in lines if tag in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
     for l in sel[:3]: print(l.split('] ')[-1])
