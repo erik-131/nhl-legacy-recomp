@@ -1,0 +1,119 @@
+From 33228de78525464b3ab83a362c0898ef738574c0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 15:30:26 +0100
+Subject: [PATCH] diag: PM4 packet history dump around long WAIT_REG_MEM
+ (REX_WRM_TRACE)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQAuyvWexFM1CJknxUd7jY
+---
+ src/graphics/command_processor.cpp | 51 ++++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a5c81d3..2b3ba94 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -269,6 +269,38 @@ void NhlCpProfileMaybeLog() {
+   win_start = now;
+   cpu_start = cpu;
+ }
++bool NhlWrmTraceEnabled() {
++  static const bool on = [] {
++    const char* e = std::getenv("REX_WRM_TRACE");
++    return e && *e && *e != '0';
++  }();
++  return on;
++}
++struct NhlPktHist { uint64_t t; uint32_t op, a, b; };
++NhlPktHist nhl_hist[32];
++uint32_t nhl_hist_pos = 0;
++inline void NhlHistPush(uint32_t op, uint32_t a = 0, uint32_t b = 0) {
++  nhl_hist[nhl_hist_pos++ & 31] = {NhlNowNs(), op, a, b};
++}
++inline void NhlHistSetLast(uint32_t a, uint32_t b) {
++  NhlPktHist& h = nhl_hist[(nhl_hist_pos - 1) & 31];
++  h.a = a;
++  h.b = b;
++}
++void NhlHistDump(const char* why, uint64_t waited_ns) {
++  static uint64_t last = 0;
++  const uint64_t now = NhlNowNs();
++  if (now - last < 1000000000ull) return;
++  last = now;
++  std::string out;
++  for (uint32_t i = 0; i < 32; ++i) {
++    const NhlPktHist& h = nhl_hist[(nhl_hist_pos + i) & 31];
++    if (!h.t) continue;
++    out += fmt::format(" {:.2f}:{:02X}/{:08X}/{:08X}", (int64_t(h.t) - int64_t(now)) / 1e6,
++                       h.op, h.a, h.b);
++  }
++  REXGPU_INFO("[nhl-pkthist] {} waited={:.2f}ms:{}", why, waited_ns / 1e6, out);
++}
+ }  // namespace
+ 
+ void CommandProcessor::WorkerThreadMain() {
+@@ -537,6 +569,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+       uint32_t scratch_addr = regs.values[XE_GPU_REG_SCRATCH_ADDR];
+       uint32_t mem_addr = scratch_addr + (scratch_reg * 4);
+       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(mem_addr), value);
++      if (NhlWrmTraceEnabled()) NhlHistPush(0xF0 + scratch_reg, mem_addr, value);
+     }
+   } else {
+     switch (index) {
+@@ -939,6 +972,13 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+     }
+   }
+ 
++  if (NhlWrmTraceEnabled() && opcode != PM4_INDIRECT_BUFFER && opcode != PM4_INDIRECT_BUFFER_PFD &&
++      opcode != PM4_DRAW_INDX && opcode != PM4_DRAW_INDX_2 && opcode != PM4_SET_CONSTANT &&
++      opcode != PM4_SET_CONSTANT2 && opcode != PM4_LOAD_ALU_CONSTANT &&
++      opcode != PM4_SET_SHADER_CONSTANTS && opcode != PM4_IM_LOAD &&
++      opcode != PM4_IM_LOAD_IMMEDIATE && opcode != PM4_INVALIDATE_STATE) {
++    NhlHistPush(opcode);
++  }
+   const bool nhl_prof = NhlCpProfileEnabled();
+   uint64_t nhl_t0 = 0, nhl_saved_child = 0;
+   if (nhl_prof) {
+@@ -1117,6 +1157,11 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader,
+ 
+   // generate interrupt from the command stream
+   uint32_t cpu_mask = reader->ReadAndSwap<uint32_t>();
++  const uint64_t nhl_int_t0 = NhlWrmTraceEnabled() ? NhlNowNs() : 0;
++  struct NhlIntDone {
++    uint64_t t0; uint32_t mask;
++    ~NhlIntDone() { if (t0) NhlHistSetLast(mask, uint32_t((NhlNowNs() - t0) / 1000)); }
++  } nhl_int_done{nhl_int_t0, cpu_mask};
+   for (int n = 0; n < 6; n++) {
+     if (cpu_mask & (1 << n)) {
+       if (graphics_system_) {
+@@ -1268,6 +1313,10 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+     }
+   } while (!matched);
+ 
++  if (nhl_wrm_trace) {
++    NhlHistSetLast(poll_reg_addr, (ref & 0xFFFFFF) | (nhl_wrm_iters > 0xFF ? 0xFF000000u : nhl_wrm_iters << 24));
++    if (NhlNowNs() - nhl_wrm_t0 > 1000000ull) NhlHistDump("wrm", NhlNowNs() - nhl_wrm_t0);
++  }
+   if (nhl_wrm_trace) {
+     struct Ent { uint64_t ns = 0, n = 0, waited = 0, iters = 0; uint32_t info, ref, mask, wait,
+                  first, last; };
+@@ -1351,6 +1400,7 @@ bool CommandProcessor::ExecutePacketType3_MEM_WRITE(memory::RingBuffer* reader,
+   uint32_t write_addr = reader->ReadAndSwap<uint32_t>();
+   for (uint32_t i = 0; i < count - 1; i++) {
+     uint32_t write_data = reader->ReadAndSwap<uint32_t>();
++    if (i == 0 && NhlWrmTraceEnabled()) NhlHistSetLast(write_addr, write_data);
+ 
+     auto endianness = static_cast<xenos::Endian>(write_addr & 0x3);
+     auto addr = write_addr & ~0x3;
+@@ -1458,6 +1508,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
+     // Write value.
+     data_value = value;
+   }
++  if (NhlWrmTraceEnabled()) NhlHistSetLast(address, data_value);
+   auto endianness = static_cast<xenos::Endian>(address & 0x3);
+   address &= ~0x3;
+   data_value = GpuSwap(data_value, endianness);
+-- 
+2.43.0
+

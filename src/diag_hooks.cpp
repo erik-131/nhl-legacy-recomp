@@ -1194,3 +1194,22 @@ extern "C" REX_FUNC(sub_827EDAB0) {
                 now_ms - ws, c, n / 1e6, 100.0 * (n / 1e6) / double(now_ms - ws), top);
   }
 }
+
+// --- NHL_SWAP_INTERVAL=<n>: override the guest D3D presentation interval -----------
+// sub_827F0D88 is the D3D swap callback the GPU stream invokes through a CP interrupt
+// (scratch4 = 827F0D88, scratch5 = arg, then WAIT_REG_MEM until scratch1 == 0). Bits
+// 8..11 of the arg are the presentation interval: with interval 1 the callback defers
+// the flip (and the CP!) to the next vblank, so a frame whose CP work takes ~20 ms is
+// quantized to two vblanks (~30 fps). Forcing 0 flips immediately; the host swapchain
+// still paces presentation.
+REX_EXTERN(__imp__sub_827F0D88);
+extern "C" REX_FUNC(sub_827F0D88) {
+  static const int forced = [] {
+    const char* e = std::getenv("NHL_SWAP_INTERVAL");
+    return (e && *e) ? int(std::strtol(e, nullptr, 10)) : -1;
+  }();
+  if (forced >= 0 && forced <= 15) {
+    ctx.r3.u64 = (ctx.r3.u64 & ~uint64_t(0xF00)) | (uint64_t(forced) << 8);
+  }
+  __imp__sub_827F0D88(ctx, base);
+}

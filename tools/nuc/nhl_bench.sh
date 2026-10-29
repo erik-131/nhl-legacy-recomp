@@ -65,6 +65,8 @@ if cp:
         print(f"  op {op}: {100*ms/W:.1f}% veggtid, {c/(W/1000):.0f}/s, {1000*ms/max(c,1):.1f} us/stk")
 wr=[l for l in lines if 'nhl-wrm' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in wr[:3]: print(l.split('] ',4)[-1][:900])
+ph=[l for l in lines if 'nhl-pkthist' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+for l in ph[:4]: print(l.split('] ',4)[-1][:1400])
 rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
