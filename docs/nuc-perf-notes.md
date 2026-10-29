@@ -38,3 +38,22 @@ packet; the CP thread in turn blocks on GPU fences. `sdk/rexglue-rptr-incrementa
 - Smoke test under Xvfb + llvmpipe: boots, Vulkan device up, presents frames, stops on missing game data (expected).
 - Deploy to NUC: `nhl-linux/` next to the Windows install in the Wolf Steam home, `game -> ../nhl/game`,
   added as a native (no Proton) non-Steam shortcut.
+
+## Measured on the NUC, Linux build in the Wolf Steam session (2026-10-29)
+Benchmark: `tools/nuc/nhl_bench.sh` — runs inside the live Wolf Steam container (gamescope
+`--backend headless` asserts in wlr_linux_dmabuf feedback on this setup), scripted vpad route
+(A every 90 frames 2572–6352, START at 6600/6750/6900), window = guest frames 9000–10500,
+validated with `NHL_SHOT_AFTER_FRAME` captures (in-play + replay). `NHL_VK_NO_VSYNC=1`.
+Caveat: a Moonlight session at 3840x2160 and Frigate were active on the same iGPU.
+
+| run | result | window draws/frame | CP thread |
+|---|---|---|---|
+| baseline-linux-r3 | **9.08 fps, 110 ms/frame** | ~1650 | blocked 57–81 %, 0 frame-slot waits, 6–11 readback drains/s of 55–120 ms |
+| menus (r2, lineups) | 60 fps | ~230 | blocked 4–6 %, frame-slot waits only |
+| jersey select (r1) | 30 fps cap | ~169 | blocked ~60 %, 30 drains/s × ~20 ms |
+
+Interpretation: every gameplay frame ends in the batched readback flush, which waits for the GPU to
+finish the frame (~55–120 ms) — so the GPU needs roughly 60+ ms per gameplay frame, and CP work
+(~35–40 ms) cannot overlap it because of the drain. To reach 16.7 ms the GPU side must get ~4x
+cheaper (FSI/EDRAM emulation → host render targets, cf. The Simpsons Game recomp), and the drain
+must stop serialising CP and GPU (lazy write-back).
