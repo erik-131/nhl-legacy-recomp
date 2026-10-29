@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
 // Diagnostic + debugging infrastructure for the NHL Legacy recomp.
 //
 // This file holds ONLY diagnostics/tooling — it contains no behavioral fixes.
@@ -1150,9 +1154,18 @@ extern "C" REX_FUNC(sub_827EDAB0) {
     __imp__sub_827EDAB0(ctx, base);
     return;
   }
+  const uint32_t caller_lr = uint32_t(ctx.lr);
   const auto t0 = std::chrono::steady_clock::now();
   __imp__sub_827EDAB0(ctx, base);
   const auto t1 = std::chrono::steady_clock::now();
+  static std::mutex lr_mu;
+  static std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> lr_hist;
+  {
+    std::lock_guard<std::mutex> lk(lr_mu);
+    auto& h = lr_hist[caller_lr];
+    h.first += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    ++h.second;
+  }
   static std::atomic<uint64_t> ns{0}, calls{0};
   static std::atomic<int64_t> window_start{0};
   ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
@@ -1164,7 +1177,20 @@ extern "C" REX_FUNC(sub_827EDAB0) {
     window_start.compare_exchange_strong(ws, now_ms);
   } else if (now_ms - ws >= 1000 && window_start.compare_exchange_strong(ws, now_ms)) {
     const uint64_t n = ns.exchange(0), c = calls.exchange(0);
-    REXLOG_INFO("[nhl-fencespin] window={} ms calls={} in_wait={:.1f} ms ({:.0f}%)",
-                now_ms - ws, c, n / 1e6, 100.0 * (n / 1e6) / double(now_ms - ws));
+    std::string top;
+    {
+      std::lock_guard<std::mutex> lk(lr_mu);
+      std::vector<std::pair<uint32_t, std::pair<uint64_t, uint64_t>>> v(lr_hist.begin(),
+                                                                       lr_hist.end());
+      std::sort(v.begin(), v.end(),
+                [](auto& a, auto& b) { return a.second.first > b.second.first; });
+      for (size_t i = 0; i < v.size() && i < 5; ++i) {
+        top += fmt::format(" {:08X}:{:.0f}ms/{}", v[i].first, v[i].second.first / 1e6,
+                           v[i].second.second);
+      }
+      lr_hist.clear();
+    }
+    REXLOG_INFO("[nhl-fencespin] window={} ms calls={} in_wait={:.1f} ms ({:.0f}%) callers:{}",
+                now_ms - ws, c, n / 1e6, 100.0 * (n / 1e6) / double(now_ms - ws), top);
   }
 }

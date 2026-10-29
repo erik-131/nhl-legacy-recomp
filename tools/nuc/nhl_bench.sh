@@ -63,6 +63,8 @@ if cp:
     print(f"CP-profil ({n} vinduer): cpu {100*C/W:.0f}%  exec {100*E/W:.0f}%  type3 {100*T/W:.0f}%  annet {100*(E-T)/W:.0f}% av veggtid")
     for op,(ms,c) in sorted(agg.items(),key=lambda x:-x[1][0])[:8]:
         print(f"  op {op}: {100*ms/W:.1f}% veggtid, {c/(W/1000):.0f}/s, {1000*ms/max(c,1):.1f} us/stk")
+wr=[l for l in lines if 'nhl-wrm' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+for l in wr[:3]: print(l.split('] ',4)[-1][:900])
 rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
