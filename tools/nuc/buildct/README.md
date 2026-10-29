@@ -43,6 +43,7 @@ What the key can do: only the gate verbs. `bench` accepts only `NHL_*`/`REX_*` e
 ## 4. First build + Claude Code
 ```
 cd /opt/nhl/nhl-legacy-recomp && tools/nuc/buildct/nhl_build.sh --deploy     # ~5-10 min on 8 cores
+cp tools/nuc/buildct/CLAUDE.md CLAUDE.local.md   # agent instructions, loaded automatically
 claude            # log in with your claude.ai account, then: /remote-control
 ```
 Keep that session running (tmux/screen). The cloud session reaches it via ListAgents/SendMessage.
