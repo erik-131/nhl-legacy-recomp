@@ -80,6 +80,8 @@ if gp:
     print(f"GPU-profil ({len(gp)} vinduer): GPU opptatt {100*B/W:.0f}% av veggtid, {B/fr:.1f} ms/bilde; hull mellom submits {I/fr:.1f} ms/bilde; {S/fr:.1f} submits/bilde")
     for n,(ms,c) in sorted(cats.items(),key=lambda x:-x[1][0]):
         print(f"  {n}: {ms/fr:.2f} ms/bilde ({100*ms/max(B,1e-9):.0f}% av GPU-tid), {c/fr:.0f} segmenter/bilde")
+rl=[l for l in lines if 'nhl-reslog' in l]
+for l in rl[:500]: print(l.split('[nhl-reslog] ',1)[-1][:300])
 rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
