@@ -70,3 +70,14 @@ frame. With host RTs the GPU cost drops sharply and the CP thread (~30 ms/frame 
 ~1800 draws) becomes the limit. 60 fps therefore needs both a *correct* host-RT path (Simpsons-style)
 and roughly halving CP-thread cost. Note: a Moonlight client with a real controller makes the vpad
 player 2 and the run stalls on the gamer-profile sign-in dialog — run benchmarks with no client attached.
+
+## Guest fence-wait share (NHL_FENCE_SPIN_STATS, CT 105 at 16 GB) — 2026-10-29
+| run | ms/frame | guest in sub_827EDAB0 | guest real work/frame | CP thread |
+|---|---|---|---|---|
+| fsi | 117 | 92 % | ~9 ms | 20 % CPU, 72 % blocked |
+| rtv | 44.5 | 80–83 % (~35 fence waits/frame) | ~9 ms | 42 % busy, 30 % blocked (drains), ~28 % idle |
+Conclusion: the recompiled game itself costs only ~9 ms/frame. The limit is the GPU path (fsi) and then
+the CP thread: per-draw cost (5.8 µs vs 2 µs on M4), readback drains, and guest↔CP ping-pong bubbles.
+Order of work: lazy readback write-back → Simpsons host-RT correctness → CP per-draw cost.
+Also seen: "Audio Worker" thread ~75 % of a core in every run (looks like a busy-wait). CT 105 needed 16 GB
+(8 GB thrashed swap and hung a run).
