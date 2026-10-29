@@ -67,6 +67,19 @@ wr=[l for l in lines if 'nhl-wrm' in l and t0<=datetime.datetime.strptime(l[1:24
 for l in wr[:3]: print(l.split('] ',4)[-1][:900])
 ph=[l for l in lines if 'nhl-pkthist' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in ph[:4]: print(l.split('] ',4)[-1][:1400])
+gp=[l for l in lines if 'nhl-gpuprof] window' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+if gp:
+    W=B=I=0.0; S=0; cats={}
+    for l in gp:
+        m=re.search(r'window=(\d+)ms busy=([\d.]+)ms idle_gaps=([\d.]+)ms subs=(\d+)',l)
+        W+=float(m[1]); B+=float(m[2]); I+=float(m[3]); S+=int(m[4])
+        for n,ms,c in re.findall(r' ([a-z]+)=([\d.]+)ms/(\d+)',l):
+            if n in ('busy','idle_gaps'): continue
+            a=cats.setdefault(n,[0.0,0]); a[0]+=float(ms); a[1]+=int(c)
+    fr=df/dt*W/1000 if dt else 1
+    print(f"GPU-profil ({len(gp)} vinduer): GPU opptatt {100*B/W:.0f}% av veggtid, {B/fr:.1f} ms/bilde; hull mellom submits {I/fr:.1f} ms/bilde; {S/fr:.1f} submits/bilde")
+    for n,(ms,c) in sorted(cats.items(),key=lambda x:-x[1][0]):
+        print(f"  {n}: {ms/fr:.2f} ms/bilde ({100*ms/max(B,1e-9):.0f}% av GPU-tid), {c/fr:.0f} segmenter/bilde")
 rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):

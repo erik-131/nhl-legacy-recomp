@@ -1,0 +1,374 @@
+From 37e877229ab9c67b53b76b02b9d80fb0882e6d18 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 16:03:49 +0100
+Subject: [PATCH] diag: REX_GPU_PROF - GPU timestamp profile per work category
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQAuyvWexFM1CJknxUd7jY
+---
+ .../rex/graphics/vulkan/command_processor.h   |  42 +++++
+ .../graphics/vulkan/deferred_command_buffer.h |  15 ++
+ .../rex/ui/vulkan/functions/device_1_0.inc    |   2 +
+ src/graphics/vulkan/command_processor.cpp     | 156 ++++++++++++++++++
+ .../vulkan/deferred_command_buffer.cpp        |   5 +
+ 5 files changed, 220 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 2d94c62..4471b4c 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -423,6 +423,48 @@ class VulkanCommandProcessor : public CommandProcessor {
+   void CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission);
+   // NHL diag: set while BeginSubmission awaits a frame slot (REX_FENCE_WAIT_STATS).
+   bool nhl_fence_wait_is_frame_ = false;
++  // NHL diag (REX_GPU_PROF=1): GPU timestamp profile per work category.
++ public:
++  enum NhlGpuCat : uint32_t {
++    kNhlGpuOther = 0,
++    kNhlGpuPrep,
++    kNhlGpuTex,
++    kNhlGpuRt,
++    kNhlGpuUpload,
++    kNhlGpuDraw,
++    kNhlGpuResolve,
++    kNhlGpuSwap,
++    kNhlGpuCatCount
++  };
++  void NhlGpuMark(uint32_t cat);
++
++ private:
++  void NhlGpuProfOnBeginSubmission();
++  void NhlGpuProfBeforeExecute(VkCommandBuffer cb);
++  void NhlGpuProfAfterExecute(VkCommandBuffer cb);
++  void NhlGpuProfOnSubmitted(uint64_t submission);
++  void NhlGpuProfPoll();
++  struct NhlGpuProfPending {
++    uint64_t submission;
++    VkQueryPool pool;
++    uint32_t count;
++    std::vector<uint8_t> cats;
++  };
++  std::vector<VkQueryPool> nhl_gpu_pools_free_;
++  std::deque<NhlGpuProfPending> nhl_gpu_pending_;
++  VkQueryPool nhl_gpu_pool_ = VK_NULL_HANDLE;
++  uint32_t nhl_gpu_count_ = 0;
++  uint32_t nhl_gpu_cur_cat_ = UINT32_MAX;
++  std::vector<uint8_t> nhl_gpu_cats_;
++  double nhl_gpu_ns_per_tick_ = 0.0;
++  uint64_t nhl_gpu_cat_ticks_[kNhlGpuCatCount] = {};
++  uint64_t nhl_gpu_cat_marks_[kNhlGpuCatCount] = {};
++  uint64_t nhl_gpu_busy_ticks_ = 0;
++  uint64_t nhl_gpu_last_end_tick_ = 0;
++  uint64_t nhl_gpu_idle_ticks_ = 0;
++  uint64_t nhl_gpu_submissions_ = 0;
++  uint64_t nhl_gpu_overflow_ = 0;
++  uint64_t nhl_gpu_window_start_ns_ = 0;
+   // If is_guest_command is true, a new full frame - with full cleanup of
+   // resources and, if needed, starting capturing - is opened if pending (as
+   // opposed to simply resuming after mid-frame synchronization). Returns
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index aac6905..4df6390 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -301,6 +301,14 @@ class DeferredCommandBuffer {
+   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
+   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
+ 
++  void CmdVkWriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, uint32_t query) {
++    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
++        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
++    args.stage = stage;
++    args.query_pool = query_pool;
++    args.query = query;
++  }
++
+   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
+     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
+         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
+@@ -419,6 +427,13 @@ class DeferredCommandBuffer {
+     kVkSetStencilReference,
+     kVkSetStencilWriteMask,
+     kVkSetViewport,
++    kVkWriteTimestamp,
++  };
++
++  struct ArgsVkWriteTimestamp {
++    VkPipelineStageFlagBits stage;
++    VkQueryPool query_pool;
++    uint32_t query;
+   };
+ 
+   struct CommandHeader {
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index ea47f7c..c668db2 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -27,6 +27,7 @@ XE_UI_VULKAN_FUNCTION(vkCmdEndQuery)
+ XE_UI_VULKAN_FUNCTION(vkCmdPipelineBarrier)
+ XE_UI_VULKAN_FUNCTION(vkCmdPushConstants)
+ XE_UI_VULKAN_FUNCTION(vkCmdResetQueryPool)
++XE_UI_VULKAN_FUNCTION(vkCmdWriteTimestamp)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetBlendConstants)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetDepthBias)
+ XE_UI_VULKAN_FUNCTION(vkCmdSetScissor)
+@@ -74,6 +75,7 @@ XE_UI_VULKAN_FUNCTION(vkGetBufferMemoryRequirements)
+ XE_UI_VULKAN_FUNCTION(vkGetDeviceQueue)
+ XE_UI_VULKAN_FUNCTION(vkGetFenceStatus)
+ XE_UI_VULKAN_FUNCTION(vkGetImageMemoryRequirements)
++XE_UI_VULKAN_FUNCTION(vkGetQueryPoolResults)
+ XE_UI_VULKAN_FUNCTION(vkInvalidateMappedMemoryRanges)
+ XE_UI_VULKAN_FUNCTION(vkMapMemory)
+ XE_UI_VULKAN_FUNCTION(vkResetCommandPool)
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 1f82fca..14ae965 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2298,6 +2298,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
+     return;
+   }
++  NhlGpuMark(kNhlGpuSwap);
+ 
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+@@ -3938,6 +3939,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     // REX_DEFER_TILE_CLEAR: run any resolve clear deferred out of the resolve
+     // itself. Must be AFTER BeginSubmission - FlushPendingFsiClear ends the
+     // render pass, and EndRenderPass asserts an open submission.
++    NhlGpuMark(kNhlGpuPrep);
+     render_target_cache_->FlushPendingFsiClear();
+ 
+     // Process primitives.
+@@ -4068,9 +4070,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   uint32_t used_texture_mask =
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
++  NhlGpuMark(kNhlGpuTex);
+   texture_cache_->RequestTextures(used_texture_mask);
+ 
+   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
++  NhlGpuMark(kNhlGpuRt);
+   // Set up the render targets - this may perform dispatches and draws.
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+@@ -4210,6 +4214,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     return draw_fail("update_bindings");
+   }
+ 
++  NhlGpuMark(kNhlGpuUpload);
+   // Ensure vertex buffers are resident.
+   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+@@ -4344,6 +4349,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // After all commands that may dispatch, copy or insert barriers, submit
+   // the barriers (may end the render pass), and (re)enter the render pass
+   // before drawing.
++  NhlGpuMark(kNhlGpuDraw);
+   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+       render_target_cache_->last_update_render_pass(),
+       render_target_cache_->last_update_framebuffer());
+@@ -4622,6 +4628,7 @@ bool VulkanCommandProcessor::IssueCopy() {
+   if (!BeginSubmission(true)) {
+     return false;
+   }
++  NhlGpuMark(kNhlGpuResolve);
+ 
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+@@ -5542,6 +5549,150 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+   }
+ }
+ 
++
++// ---- NHL diag: REX_GPU_PROF=1 -------------------------------------------------------
++// Timestamps (BOTTOM_OF_PIPE) are written whenever the recorded work switches category;
++// the delta between consecutive timestamps is attributed to the category that was
++// active, so each category gets the GPU time its recorded work took to drain. Logged
++// once per second as [nhl-gpuprof] (ms per second of wall time).
++namespace {
++bool NhlGpuProfEnabled() {
++  static const bool on = [] {
++    const char* e = std::getenv("REX_GPU_PROF");
++    return e && *e && *e != '0';
++  }();
++  return on;
++}
++constexpr uint32_t kNhlGpuQueries = 8192;
++uint64_t NhlGpuNowNs() {
++  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                      std::chrono::steady_clock::now().time_since_epoch())
++                      .count());
++}
++}  // namespace
++
++void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
++  if (!NhlGpuProfEnabled() || !submission_open_ || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
++  if (cat == nhl_gpu_cur_cat_) return;
++  if (nhl_gpu_count_ >= kNhlGpuQueries - 1) {
++    ++nhl_gpu_overflow_;
++    return;
++  }
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                                               nhl_gpu_pool_, nhl_gpu_count_++);
++  nhl_gpu_cats_.push_back(uint8_t(cat));
++  nhl_gpu_cur_cat_ = cat;
++  ++nhl_gpu_cat_marks_[cat];
++}
++
++void VulkanCommandProcessor::NhlGpuProfOnBeginSubmission() {
++  if (!NhlGpuProfEnabled()) return;
++  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  if (nhl_gpu_ns_per_tick_ == 0.0) {
++    VkPhysicalDeviceProperties props;
++    vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(
++        vulkan_device->physical_device(), &props);
++    nhl_gpu_ns_per_tick_ = props.limits.timestampPeriod;
++    REXGPU_INFO("[nhl-gpuprof] enabled, timestampPeriod={} ns", nhl_gpu_ns_per_tick_);
++  }
++  NhlGpuProfPoll();
++  if (nhl_gpu_pools_free_.empty()) {
++    VkQueryPoolCreateInfo info = {};
++    info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
++    info.queryCount = kNhlGpuQueries;
++    VkQueryPool pool;
++    if (dfn.vkCreateQueryPool(vulkan_device->device(), &info, nullptr, &pool) != VK_SUCCESS) {
++      nhl_gpu_pool_ = VK_NULL_HANDLE;
++      return;
++    }
++    nhl_gpu_pools_free_.push_back(pool);
++  }
++  nhl_gpu_pool_ = nhl_gpu_pools_free_.back();
++  nhl_gpu_pools_free_.pop_back();
++  nhl_gpu_count_ = 0;
++  nhl_gpu_cats_.clear();
++  nhl_gpu_cur_cat_ = UINT32_MAX;
++  NhlGpuMark(kNhlGpuOther);
++}
++
++void VulkanCommandProcessor::NhlGpuProfBeforeExecute(VkCommandBuffer cb) {
++  if (!NhlGpuProfEnabled() || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
++  const ui::vulkan::VulkanDevice::Functions& dfn = GetVulkanDevice()->functions();
++  dfn.vkCmdResetQueryPool(cb, nhl_gpu_pool_, 0, kNhlGpuQueries);
++}
++
++void VulkanCommandProcessor::NhlGpuProfAfterExecute(VkCommandBuffer cb) {
++  if (!NhlGpuProfEnabled() || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
++  const ui::vulkan::VulkanDevice::Functions& dfn = GetVulkanDevice()->functions();
++  dfn.vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, nhl_gpu_pool_,
++                          nhl_gpu_count_++);
++}
++
++void VulkanCommandProcessor::NhlGpuProfOnSubmitted(uint64_t submission) {
++  if (!NhlGpuProfEnabled() || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
++  NhlGpuProfPending p;
++  p.submission = submission;
++  p.pool = nhl_gpu_pool_;
++  p.count = nhl_gpu_count_;
++  p.cats = std::move(nhl_gpu_cats_);
++  nhl_gpu_pending_.push_back(std::move(p));
++  nhl_gpu_pool_ = VK_NULL_HANDLE;
++  nhl_gpu_cats_.clear();
++}
++
++void VulkanCommandProcessor::NhlGpuProfPoll() {
++  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const uint64_t completed = GetCompletedSubmission();
++  std::vector<uint64_t> ts;
++  while (!nhl_gpu_pending_.empty() && nhl_gpu_pending_.front().submission <= completed) {
++    NhlGpuProfPending& p = nhl_gpu_pending_.front();
++    ts.resize(p.count);
++    if (p.count >= 2 &&
++        dfn.vkGetQueryPoolResults(vulkan_device->device(), p.pool, 0, p.count,
++                                  sizeof(uint64_t) * p.count, ts.data(), sizeof(uint64_t),
++                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
++      for (uint32_t i = 0; i + 1 < p.count; ++i) {
++        const uint8_t cat = i < p.cats.size() ? p.cats[i] : uint8_t(kNhlGpuOther);
++        if (ts[i + 1] > ts[i]) nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
++      }
++      if (ts[p.count - 1] > ts[0]) nhl_gpu_busy_ticks_ += ts[p.count - 1] - ts[0];
++      if (nhl_gpu_last_end_tick_ && ts[0] > nhl_gpu_last_end_tick_) {
++        const uint64_t gap = ts[0] - nhl_gpu_last_end_tick_;
++        // Ignore gaps > 1 s (timer wrap / long pause).
++        if (gap * nhl_gpu_ns_per_tick_ < 1e9) nhl_gpu_idle_ticks_ += gap;
++      }
++      nhl_gpu_last_end_tick_ = ts[p.count - 1];
++      ++nhl_gpu_submissions_;
++    }
++    nhl_gpu_pools_free_.push_back(p.pool);
++    nhl_gpu_pending_.pop_front();
++  }
++  const uint64_t now = NhlGpuNowNs();
++  if (!nhl_gpu_window_start_ns_) nhl_gpu_window_start_ns_ = now;
++  if (now - nhl_gpu_window_start_ns_ >= 1000000000ull) {
++    static const char* kNames[kNhlGpuCatCount] = {"other",  "prep", "tex",     "rt",
++                                                  "upload", "draw", "resolve", "swap"};
++    const double w = (now - nhl_gpu_window_start_ns_) / 1e6;
++    const double k = nhl_gpu_ns_per_tick_ / 1e6;
++    std::string out;
++    for (uint32_t c = 0; c < kNhlGpuCatCount; ++c) {
++      out += fmt::format(" {}={:.1f}ms/{}", kNames[c], nhl_gpu_cat_ticks_[c] * k,
++                         nhl_gpu_cat_marks_[c]);
++    }
++    REXGPU_INFO("[nhl-gpuprof] window={:.0f}ms busy={:.1f}ms idle_gaps={:.1f}ms subs={} "
++                "overflow={}{}",
++                w, nhl_gpu_busy_ticks_ * k, nhl_gpu_idle_ticks_ * k, nhl_gpu_submissions_,
++                nhl_gpu_overflow_, out);
++    std::memset(nhl_gpu_cat_ticks_, 0, sizeof(nhl_gpu_cat_ticks_));
++    std::memset(nhl_gpu_cat_marks_, 0, sizeof(nhl_gpu_cat_marks_));
++    nhl_gpu_busy_ticks_ = nhl_gpu_idle_ticks_ = nhl_gpu_submissions_ = nhl_gpu_overflow_ = 0;
++    nhl_gpu_window_start_ns_ = now;
++  }
++}
++
+ bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
+   return !submission_open_ || (!scratch_buffer_used_ && !pipeline_cache_->IsCreatingPipelines());
+ }
+@@ -5617,6 +5768,8 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     primitive_processor_->BeginSubmission();
+ 
+     texture_cache_->BeginSubmission(GetCurrentSubmission());
++
++    NhlGpuProfOnBeginSubmission();
+   }
+ 
+   if (is_opening_frame) {
+@@ -5884,7 +6037,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+       return false;
+     }
++    NhlGpuProfBeforeExecute(command_buffer.buffer);
+     deferred_command_buffer_.Execute(command_buffer.buffer);
++    NhlGpuProfAfterExecute(command_buffer.buffer);
+     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to end a Vulkan command buffer");
+       return false;
+@@ -5929,6 +6084,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       return false;
+     }
+     uint64_t submission_current = GetCurrentSubmission();
++    NhlGpuProfOnSubmitted(submission_current);
+     current_submission_wait_stage_masks_.clear();
+     for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
+       submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index 63aee41..42cb128 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -288,6 +288,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+                                 args.query_count);
+       } break;
+ 
++      case Command::kVkWriteTimestamp: {
++        auto& args = *reinterpret_cast<const ArgsVkWriteTimestamp*>(stream);
++        dfn.vkCmdWriteTimestamp(command_buffer, args.stage, args.query_pool, args.query);
++      } break;
++
+       case Command::kVkSetBlendConstants: {
+         auto& args = *reinterpret_cast<const ArgsVkSetBlendConstants*>(stream);
+         dfn.vkCmdSetBlendConstants(command_buffer, args.blend_constants);
+-- 
+2.43.0
+
