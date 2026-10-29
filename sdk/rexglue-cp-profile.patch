@@ -1,0 +1,133 @@
+From ccc1e65939774142cdd34f642694c08f38e5fc7b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 14:59:38 +0100
+Subject: [PATCH] diag: REX_CP_PROFILE - per-opcode exclusive CP wall time + CP
+ thread CPU
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQAuyvWexFM1CJknxUd7jY
+---
+ src/graphics/command_processor.cpp | 79 +++++++++++++++++++++++++++++-
+ 1 file changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index e8ee899..5b9f82e 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <string>
++#include <ctime>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstdlib>
+@@ -214,6 +216,59 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
+   CallInThread([this, swap_post_effect]() { swap_post_effect_actual_ = swap_post_effect; });
+ }
+ 
++// NHL diag (REX_CP_PROFILE=1): exclusive wall time per PM4 type-3 opcode, plus
++// CP-thread CPU vs wall time, logged once per second as [nhl-cpprof].
++namespace {
++bool NhlCpProfileEnabled() {
++  static const bool on = [] {
++    const char* e = std::getenv("REX_CP_PROFILE");
++    return e && *e && *e != '0';
++  }();
++  return on;
++}
++uint64_t nhl_cpprof_ns[128];
++uint64_t nhl_cpprof_cnt[128];
++uint64_t nhl_cpprof_child_ns = 0;
++uint64_t nhl_cpprof_exec_ns = 0;
++inline uint64_t NhlNowNs() {
++  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                      std::chrono::steady_clock::now().time_since_epoch())
++                      .count());
++}
++inline uint64_t NhlThreadCpuNs() {
++  timespec ts{};
++  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
++  return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
++}
++void NhlCpProfileMaybeLog() {
++  static uint64_t win_start = NhlNowNs();
++  static uint64_t cpu_start = NhlThreadCpuNs();
++  const uint64_t now = NhlNowNs();
++  if (now - win_start < 1000000000ull) return;
++  const uint64_t cpu = NhlThreadCpuNs();
++  const double w = (now - win_start) / 1e6;
++  uint64_t sum = 0;
++  int idx[128];
++  for (int i = 0; i < 128; ++i) { idx[i] = i; sum += nhl_cpprof_ns[i]; }
++  std::sort(idx, idx + 128, [](int a, int b) { return nhl_cpprof_ns[a] > nhl_cpprof_ns[b]; });
++  std::string top;
++  for (int k = 0; k < 8 && nhl_cpprof_ns[idx[k]]; ++k) {
++    top += fmt::format(" {:02X}:{:.1f}ms/{}", idx[k], nhl_cpprof_ns[idx[k]] / 1e6,
++                       nhl_cpprof_cnt[idx[k]]);
++  }
++  REXGPU_INFO("[nhl-cpprof] window={:.0f}ms cpu={:.1f}ms ({:.0f}%) exec={:.1f}ms type3={:.1f}ms "
++              "other={:.1f}ms top:{}",
++              w, (cpu - cpu_start) / 1e6, 100.0 * (cpu - cpu_start) / 1e6 / w,
++              nhl_cpprof_exec_ns / 1e6, sum / 1e6,
++              (double(nhl_cpprof_exec_ns) - double(sum)) / 1e6, top);
++  std::memset(nhl_cpprof_ns, 0, sizeof(nhl_cpprof_ns));
++  std::memset(nhl_cpprof_cnt, 0, sizeof(nhl_cpprof_cnt));
++  nhl_cpprof_exec_ns = 0;
++  win_start = now;
++  cpu_start = cpu;
++}
++}  // namespace
++
+ void CommandProcessor::WorkerThreadMain() {
+   if (!SetupContext()) {
+     rex::FatalError("Unable to setup command processor internal state");
+@@ -284,7 +339,15 @@ void CommandProcessor::WorkerThreadMain() {
+ 
+     // Execute. Note that we handle wraparound transparently.
+     ++kicks_since_stall;
+-    read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
++    {
++      const bool prof = NhlCpProfileEnabled();
++      const uint64_t t0 = prof ? NhlNowNs() : 0;
++      read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
++      if (prof) {
++        nhl_cpprof_exec_ns += NhlNowNs() - t0;
++        NhlCpProfileMaybeLog();
++      }
++    }
+ 
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+@@ -874,6 +937,13 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+     }
+   }
+ 
++  const bool nhl_prof = NhlCpProfileEnabled();
++  uint64_t nhl_t0 = 0, nhl_saved_child = 0;
++  if (nhl_prof) {
++    nhl_saved_child = nhl_cpprof_child_ns;
++    nhl_cpprof_child_ns = 0;
++    nhl_t0 = NhlNowNs();
++  }
+   bool result = false;
+   switch (opcode) {
+     case PM4_ME_INIT:
+@@ -1008,6 +1078,13 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+       break;
+   }
+ 
++  if (nhl_prof) {
++    const uint64_t el = NhlNowNs() - nhl_t0;
++    nhl_cpprof_ns[opcode] += el > nhl_cpprof_child_ns ? el - nhl_cpprof_child_ns : 0;
++    ++nhl_cpprof_cnt[opcode];
++    nhl_cpprof_child_ns = nhl_saved_child + el;
++  }
++
+   assert_true(reader->read_offset() ==
+               (data_start_offset + (count * sizeof(uint32_t))) % reader->capacity());
+   return result;
+-- 
+2.43.0
+

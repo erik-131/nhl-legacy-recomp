@@ -52,6 +52,17 @@ if ci:
     pc=[float(re.search(r'\((\d+)%\)',l)[1]) for l in ci]
     print(f"CP tom for kommandoer: snitt {sum(pc)/len(pc):.0f}% av veggtid")
     for l in ci[:2]: print(l.split('] ')[-1])
+cp=[l for l in lines if 'nhl-cpprof' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
+if cp:
+    n=len(cp); agg={}; W=C=E=T=0.0
+    for l in cp:
+        m=re.search(r'window=(\d+)ms cpu=([\d.]+)ms.*exec=([\d.]+)ms type3=([\d.]+)ms',l)
+        W+=float(m[1]); C+=float(m[2]); E+=float(m[3]); T+=float(m[4])
+        for op,ms,c in re.findall(r' ([0-9A-F]{2}):([\d.]+)ms/(\d+)',l):
+            a=agg.setdefault(op,[0.0,0]); a[0]+=float(ms); a[1]+=int(c)
+    print(f"CP-profil ({n} vinduer): cpu {100*C/W:.0f}%  exec {100*E/W:.0f}%  type3 {100*T/W:.0f}%  annet {100*(E-T)/W:.0f}% av veggtid")
+    for op,(ms,c) in sorted(agg.items(),key=lambda x:-x[1][0])[:8]:
+        print(f"  op {op}: {100*ms/W:.1f}% veggtid, {c/(W/1000):.0f}/s, {1000*ms/max(c,1):.1f} us/stk")
 rb=[l for l in lines if 'nhl-rbtrace' in l and t0<=datetime.datetime.strptime(l[1:24],'%Y-%m-%d %H:%M:%S.%f').timestamp()<=t1]
 for l in rb[:2]: print(l.split('] ')[-1][:600])
 for tag in ('nhl-drawtime','nhl-copytime','nhl-swaptime'):
