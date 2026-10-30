@@ -12,7 +12,7 @@ Status: **open**, **fixed** (verified in play or screenshots), **fixed?** (chang
 | 6 | Green garbage on equipment (helmets) | **fixed** | `NHL_VK_RB_MAX_PER_DEST` was a lifetime cap; readback `fast` instead. |
 | 7 | Transition wipes broken (blocky black/white) | **fixed?** | All movie players shared one ffmpeg stream (arena TV + wipe stole frames, wipe fell back to the miscompiled guest decoder). Now one stream per player ring. Windows uses the same bridge. |
 | 8 | Black players in team select | **likely by design** | The preview is `feprop_jersey.rx2`: a mannequin whose body mesh has no texture; identical on fsi/ROV/rtv. Confirm against 360 footage. |
-| 9 | Odd sound effects when scrolling menus | **open** | Also in the original. Audio Worker spins ~75 % of a core; check XMA decode. |
+| 9 | Odd sound effects when scrolling menus | **open** | Also in the original. Audio Worker "spin" found: alertable waits poll in 1 ms slices on POSIX; the worker now waits non-alertable (frees ~0.4-0.75 core, may also help the Steam overlay's CPU). Sound itself not yet investigated. |
 | 10 | Goal horn not heard | **open** | Not verified whether the game should play one; no failed audio file opens in the logs. |
 | 11 | Multi-second pauses in menus and when leaving a match | **open** | Related: intermittent boot stall on the cloud screen (~1 in 4 bench runs); bench now gdb-dumps on a stall. |
 | 12 | Steam overlay stutters / unusable | **open** | Works in SteamWorld. Still unusable with the X11 window. Next suspect: MangoHud and the Steam overlay layers together (try `NHL_HUD=0`). |
