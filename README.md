@@ -51,7 +51,7 @@ Playable from start to finish of a match. Known issues are tracked in
 You need your own dump of the game (see Legal). Ubuntu/Debian with clang-20:
 
 ```sh
-git clone -b nuc-perf https://github.com/erik-131/nhl-legacy-recomp.git
+git clone https://github.com/erik-131/nhl-legacy-recomp.git
 cd nhl-legacy-recomp
 # SDK + patches, toolchain and codegen: see tools/nuc/ct105/setup.sh and build.sh
 tools/nuc/ct105/build.sh
