@@ -254,3 +254,25 @@ ahead of the GPU when opening a frame (`sdk/rexglue-frames-in-flight.patch`). Sa
 - The CPU only runs ~1 frame ahead in every config, so the "3 frames queued" theory was wrong. Cap 1 removes that
   frame (~19 ms) at ~25 % fps — offered as a launch option, not default.
 - Lesson: single-run comparisons need ≥2 runs per config before concluding.
+
+## GPU profile of correct rtv + `clear_memory_page_state=false` (2026-10-30/31 night)
+`REX_GPU_PROF` on the play config (2 runs): GPU busy 96–97 %, 20.9 / 28.3 ms per frame; split stable:
+draw 54–57 %, rt 13–17 %, resolve 10–12 %, upload 8–9 %, tex 5 %. CP: DRAW_INDX 6.9 µs/draw (34–44 % of CP time).
+GPU clock under load ~1600 MHz (max 2200) — the NUC is power/thermally limited, part of the run-to-run variance.
+
+`clear_memory_page_state=false` (SDK default true: every guest buffer re-uploaded each frame; the Simpsons recomp
+turned it off first). Interleaved A/B, GPU clock logged (`abrun.sh`), play config, vsync on:
+
+| | presented median per run | median | p5 range |
+|---|---|---|---|
+| A default | 47.2, 46.6, 45.1, 46.2 (1 run boot-stalled) | **46.4** | 26–41 |
+| B `REX_CLEAR_MEMORY_PAGE_STATE=false` | 64.7, 45.1, 59.7, 65.3, 61.2 | **61.2** | 35–37 |
+
+Images correct (gameplay, close-up with equipment/crowd). Now the launcher default.
+
+Research (other X360 recomps): Tekken 6 recomp hit the same unclipped-clear EDRAM bug and uses
+`execute_unclipped_draw_vs_on_cpu=true`; Free Riders Recompiled (own renderer) cut GPU 39 → 22 ms with one host RT
+per guest surface + deferred/aliased resolves (same idea as Simpsons' `native_rt_size_by_use` + copy-free
+resolves) — the next big candidate for our rt+resolve share (~25 %). Tekken 6's `vulkan_present_pacing`
+(VK_GOOGLE_display_timing) only helps at the display rate — revisit at 60 fps.
+Boot stall seen once more (cmps-A1); the A/B script now gdb-dumps all threads if the EA logo movie hasn't started at 110 s.
