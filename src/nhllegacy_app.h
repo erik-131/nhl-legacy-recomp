@@ -330,7 +330,11 @@ class NhllegacyApp : public rex::ReXApp {
       // (XInputGetStateEx ordinal 100 / SDL mapping) to toggle the enhancements
       // overlay. The guest never reads Guide (the 360 reserved it for the
       // dashboard), so capturing it host-side never conflicts with gameplay.
-      REXCVAR_SET(guide_button, true);
+      // NHL_NO_GUIDE=1 leaves Guide to Steam (Steam overlay / Big Picture menu) - the
+      // Linux play launcher sets it.
+      if (!std::getenv("NHL_NO_GUIDE")) {
+        REXCVAR_SET(guide_button, true);
+      }
       REXLOG_INFO("[nhl-vk-spike] Vulkan backend selected (render_target_path_vulkan={})",
                   vk_rt ? vk_rt : "rtv");
     } else
