@@ -236,3 +236,21 @@ Launcher default: present thread on, interval 0. 30 lock available via Steam lau
 Erik's play feedback (rtv + direct present, before the present thread): "absolutely playable", hitches on fast
 camera pans; slight green at the very start of the intro movie; broken (blocky) transition wipes — same on the
 Windows build; Steam overlay stutters; UI scroll sound glitches (also in the original).
+
+## Input latency check — present thread reverted (2026-10-30 late)
+Erik: present-thread build has higher fps but feels sluggish (input lag); Steam overlay still stutters.
+New: `REX_MAX_FRAMES_IN_FLIGHT=1|2` (cap below kMaxFramesInFlight=3) and `[nhl-latency]` = frames the CPU is
+ahead of the GPU when opening a frame (`sdk/rexglue-frames-in-flight.patch`). Same session, back to back:
+
+| run (int0, direct present, readback fast, vsync on) | presented median / p5 | frames ahead avg |
+|---|---|---|
+| lat-A no present thread | **53.4 / 37.9** | 1.00 |
+| lat-B present thread | 47.0 / 35.6 | 1.05 |
+| lat-C present thread, cap 2 | 46.6 / 34.9 | 1.00 |
+| lat-D present thread, cap 1 | 39.4 / 24.4 | 0.00 |
+
+- The earlier pt-int0 vs pres5 gain (55 vs 46) was run-to-run variance (scene/matchup, ±10 %); here the order is
+  reversed. **Present thread is off again** in the launcher.
+- The CPU only runs ~1 frame ahead in every config, so the "3 frames queued" theory was wrong. Cap 1 removes that
+  frame (~19 ms) at ~25 % fps — offered as a launch option, not default.
+- Lesson: single-run comparisons need ≥2 runs per config before concluding.
