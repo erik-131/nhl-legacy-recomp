@@ -10,6 +10,8 @@ steam_c() { docker ps --format '{{.Names}}' | grep -i steam | head -1 || true; }
 case "${1:-status}" in
 start)
   [ -n "$(steam_c)" ] && { echo "already running: $(steam_c)"; exit 0; }
+  # Wolf mounts <home>/udev; it can go missing when a Moonlight tile sharing this home stops.
+  sudo mkdir -p /etc/wolf/profile-data/user/WolfSteam/udev
   # runner_state_folder is mounted directly as /home/retro, so it must be the WolfSteam folder.
   api http://localhost/api/v1/profiles | python3 -c '
 import json,sys,os

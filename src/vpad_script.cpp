@@ -146,6 +146,7 @@ void StartVpadScript() {
         now_ms = p.at_ms;
       }
       SDL_SetJoystickVirtualButton(js, p.button, true);
+      nhl::graphics::MarkInputPress();
       std::this_thread::sleep_for(std::chrono::milliseconds(p.hold_ms));
       SDL_SetJoystickVirtualButton(js, p.button, false);
       now_ms += p.hold_ms;

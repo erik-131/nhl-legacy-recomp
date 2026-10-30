@@ -45,6 +45,9 @@ NhlVkPerfSnapshot ReadVkPerf();
 // driven by a fixed scripted input timeline, so frame N is the same moment.
 void PublishVkFrameIndex(uint64_t frame_index);
 uint64_t ReadVkFrameIndex();
+// Input-latency probe (NHL_LAT_PROBE=1): the virtual pad marks each scripted press; for
+// 600 ms after it every guest swap logs [nhl-lat] with the time since the press.
+void MarkInputPress();
 
 
 class NhlVkCommandProcessor : public rex::graphics::vulkan::VulkanCommandProcessor {

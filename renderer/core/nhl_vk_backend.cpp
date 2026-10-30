@@ -46,6 +46,17 @@ void PublishVkFrameIndex(uint64_t frame_index) {
 
 uint64_t ReadVkFrameIndex() { return g_frame_index.load(std::memory_order_relaxed); }
 
+namespace {
+std::atomic<int64_t> g_input_press_ns{0};
+int64_t SteadyNowNs() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
+void MarkInputPress() { g_input_press_ns.store(SteadyNowNs(), std::memory_order_relaxed); }
+
 std::atomic<NhlSceneKind> g_scene_kind{NhlSceneKind::kMenu};
 std::atomic<NhlEdgeAaMode> g_edge_aa_mode{NhlEdgeAaMode::kAuto};
 
@@ -622,6 +633,19 @@ void NhlVkCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
   // F9 streaming capture toggle (gameplay-trace benchmark source).
   PollHotkeyCapture();
+
+  // [nhl-lat]: frames swapped (and, with direct presentation, presented) within 600 ms of a
+  // scripted press, with their draw counts - the first frame whose draws jump is the reaction.
+  static const bool lat_probe = std::getenv("NHL_LAT_PROBE") != nullptr;
+  if (lat_probe) {
+    const int64_t press = g_input_press_ns.load(std::memory_order_relaxed);
+    if (press) {
+      const double dt_ms = double(SteadyNowNs() - press) / 1e6;
+      if (dt_ms >= 0.0 && dt_ms <= 600.0) {
+        REXLOG_INFO("[nhl-lat] press={} dt={:.1f}ms draws={}", press, dt_ms, draws_this_frame_);
+      }
+    }
+  }
 
   const auto now = std::chrono::steady_clock::now();
   last_frame_draws_ = draws_this_frame_;
