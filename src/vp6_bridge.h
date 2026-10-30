@@ -8,7 +8,9 @@
 void Vp6BridgeOnMovieSetup();
 
 // Plane publish (sub_8277CC98, after the guest copy): overwrite the ring
-// slot's planes with the next host-decoded frame. Pointers are HOST pointers
-// to the guest planes; pitches in bytes.
-void Vp6BridgePublish(uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
+// slot's planes with the next host-decoded frame of the movie bound to that
+// player. ring = guest address of the ring-slot descriptor (r9), which keeps
+// concurrently playing movies apart. Pointers are HOST pointers to the guest
+// planes; pitches in bytes.
+void Vp6BridgePublish(uint32_t ring, uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
                       uint32_t h, uint32_t y_pitch, uint32_t c_pitch);

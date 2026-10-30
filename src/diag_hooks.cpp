@@ -525,7 +525,7 @@ extern "C" REX_FUNC(sub_8277CC98) {
     auto host = [&](uint32_t ga) -> uint8_t* {
       return ga ? base + ga + REX_PHYS_HOST_OFFSET(ga) : nullptr;
     };
-    Vp6BridgePublish(host(desc[4]), host(desc[5]), host(desc[6]), r6, r7, yp,
+    Vp6BridgePublish(r9, host(desc[4]), host(desc[5]), host(desc[6]), r6, r7, yp,
                      cp);
   }
   if (pat_on && r6 >= 320 && r7 >= 180) {
