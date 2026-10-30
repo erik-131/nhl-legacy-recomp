@@ -77,3 +77,4 @@
 # macOS port: local build tree and extracted disc content (never commit game data)
 /build/
 /game/
+__pycache__/
