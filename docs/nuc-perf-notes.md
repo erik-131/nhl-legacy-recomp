@@ -120,3 +120,25 @@ Conclusion: the fsi cost is the draws themselves — the fragment-shader-interlo
 pixel shaders is ~7x the rtv draw cost on Arc. Texture loads, resolves and uploads are small. The way to
 60 fps on this iGPU is a correct host-RT path (find why rtv renders the 3D scene black, or port the
 Simpsons-style native host-RT path), not CPU-side work.
+
+## First runs in CT 115 (unprivileged), fresh build — 2026-10-30
+Build: clang-20.1.8 (apt.llvm.org), rexglue c94f5eb + `sdk/rexglue-nhl-nuc-combined.patch`, `JOBS=6`
+(codegen runs twice: once in `build.sh`, again as a ninja step; ~60 min total). Wolf Steam session started
+headless via `tools/nuc/ct105/wolf_session.sh start` (no Moonlight client). Bench v9, A/B against the
+2026-10-29 binaries (sha 080720bf…) in the same session, back to back:
+
+| run | binary | fps | ms/frame | draws/frame | CP blocked |
+|---|---|---|---|---|---|
+| ct115-fsi | new (1be6e15c…) | 7.43 | 134.5 | 1916 | 77 % (other_waits) |
+| ct115-OLD-fsi | 10-29 | 8.72 | 114.7 | 1607 | 74 % |
+| ct115-rtvsome-int0 (`rtv`, `some`, `NHL_SWAP_INTERVAL=0`) | new | 37.28 | 26.8 | 1712 | 53 % (frame-slot) |
+| ct115-OLD-rtvsome-int0 | 10-29 | 35.06 | 28.5 | 1651 | 57 % |
+
+- New build = old build: per draw fsi 70.2 vs 71.4 µs, rtv 15.7 vs 17.3 µs. No regression from the rebuild.
+- Both binaries are ~15–20 % slower than on 10-29 (old binary: fsi 10.35 → 8.72, rtv 43.8 → 35.1).
+  CT CPU is ~90 % idle between runs, but the iGPU runs at 1.1–1.25 GHz with no game running in the CT
+  (`gt_act_freq_mhz`) → another GPU client (Frigate on the host, or the Steam Big Picture UI in the
+  session) competes. Check outside the CT before comparing absolute numbers.
+- The matchup is not fixed: 10-29 fsi shots show ANA @ STL, today NSH vs ANA (another arena) →
+  draws/frame vary 1600–1916 between runs. Compare ms per draw, or A/B in the same session.
+- Audio Worker still ~75 % of a core.
