@@ -58,7 +58,22 @@ The CT hung twice today with memory "used" growing ~0.6–1.7 GB per run — wat
 forces sync readback for that frame), `NHL_VK_RB_TRACE`, `NHL_VK_RB_MAX_PER_DEST`, `NHL_SWAP_INTERVAL`,
 `NHL_VK_RT_PATH=fsi|rtv`, `NHL_VK_READBACK_MODE=full|fast|some|none`, any cvar via `REX_<NAME>=value`.
 
+## Status 2026-10-30
+- **rtv renders correctly** (fix: `execute_unclipped_draw_vs_on_cpu=true`, see perf notes) and is the app
+  default. Play config `nhl-linux/nhl_play.sh` (= `tools/nuc/ct105/nhl_play.sh`: interval 0,
+  `NHL_VK_RB_MAX_PER_DEST=2`, vsync on) measures 38.5 fps (p5 30, median 38.5) in gameplay; bench config
+  (no vsync) 40–43 fps. Steam shortcut "NHL Legacy (Linux)" → `nhl_play.sh` (native, no Proton).
+- Game clock is time-based: `NHL_SWAP_INTERVAL=0` keeps correct game speed.
+- GPU contention: the iGPU runs at 1.1–1.25 GHz with no game running in the CT; absolute numbers today are
+  ~15–20 % below 10-29.
+
 ## Next steps
+1. Erik play-tests rtv (watch for transition artefacts, HUD text, equipment textures).
+2. GPU profile (`REX_GPU_PROF`) of the *correct* rtv to see what is left (draws vs RT updates) → < 16.7 ms.
+   The Simpsons native host-RT path is the candidate if RT updates/transfers still cost a lot.
+3. Vsync-on cost (CP WAIT_REG_MEM sleeps), CP per-draw cost, Audio Worker spin.
+
+## Older next steps (10-29)
 1. Diff draw-state runs fsi vs rtv → find why 3D draws don't rasterize in rtv; fix in the Vulkan host-RT path.
    Reference for a working host-RT path: The Simpsons Game recomp's `tools/rexglue-sdk` (`native_*` cvars;
    their notes: `simpsons/re/native_renderer_plan.md`).

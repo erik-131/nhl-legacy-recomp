@@ -262,12 +262,13 @@ class NhllegacyApp : public rex::ReXApp {
       // taps IssueSwap/IssueDraw for the [nhl-vk-fps] report. Forwards to the base
       // Vulkan backend otherwise, so rendering matches the stock path.
       config.graphics = std::make_unique<nhl::graphics::NhlVkGraphicsSystem>();
-      // NOTE: the Vulkan backend only honors "fsi" (Path::kPixelShaderInterlock —
-      // the real per-tile EDRAM path the in-game 3D scene needs). ANY other value
-      // (incl. "rov") falls through to kHostRenderTargets (== D3D12 "rtv"), which
-      // renders the in-game scene black/missing. So default to fsi, not rov.
+      // NOTE: the Vulkan backend only honors "fsi" (Path::kPixelShaderInterlock);
+      // ANY other value falls through to kHostRenderTargets (== D3D12 "rtv").
+      // Host RTs used to render the in-game 3D scene black; fixed by
+      // execute_unclipped_draw_vs_on_cpu=true (sdk/rexglue-rtv-unclipped-extent-fix.patch),
+      // and rtv is ~5x faster than fsi on the NUC's Arc iGPU, so default to rtv.
       const char* vk_rt = std::getenv("NHL_VK_RT_PATH");
-      REXCVAR_SET(render_target_path_vulkan, std::string(vk_rt ? vk_rt : "fsi"));
+      REXCVAR_SET(render_target_path_vulkan, std::string(vk_rt ? vk_rt : "rtv"));
       // Perf measurement wants the present rate uncapped: vsync is forced on below
       // (console-pacing experiment) and would peg fps at the refresh rate, hiding
       // both headroom and dense-scene drops. NHL_VK_NO_VSYNC=1 frees it.
@@ -331,7 +332,7 @@ class NhllegacyApp : public rex::ReXApp {
       // dashboard), so capturing it host-side never conflicts with gameplay.
       REXCVAR_SET(guide_button, true);
       REXLOG_INFO("[nhl-vk-spike] Vulkan backend selected (render_target_path_vulkan={})",
-                  vk_rt ? vk_rt : "fsi");
+                  vk_rt ? vk_rt : "rtv");
     } else
 #endif
     {

@@ -142,3 +142,36 @@ headless via `tools/nuc/ct105/wolf_session.sh start` (no Moonlight client). Benc
 - The matchup is not fixed: 10-29 fsi shots show ANA @ STL, today NSH vs ANA (another arena) →
   draws/frame vary 1600–1916 between runs. Compare ms per draw, or A/B in the same session.
 - Audio Worker still ~75 % of a core.
+
+## rtv black 3D — root cause and fix (2026-10-30)
+New diag (`sdk/rexglue-reslog-ownership-diag.patch`, active in the `REX_RESOLVE_LOG_AT` frame):
+`[nhl-resdump]` = host RTs each resolve dumps, `[nhl-own]` = every EDRAM ownership change,
+`rt_d=/rt_c0=` RT keys per draw run.
+- Resolves #0–#6 identical in fsi and rtv; #6 (`copy_ctl=00000004`, depth) fine. #7 (`00100140`:
+  colour RT0, 2x→k01, colour clear) was black: tiles 0–720 were owned by `003042E0` = the **4x MSAA
+  depth RT @736** at that moment, not the 2x colour RT `00084000` the 3D pass drew into.
+- The single draw between #6 and #7 (`rp=6 surf=05020140 modectl=5 dctl=8777`, XDK depth-only 4x
+  clear quad, clipping disabled) claimed ownership with **len 2048** (whole EDRAM, wrapping onto the
+  colour tiles): `execute_unclipped_draw_vs_on_cpu` defaulted to **false** in this SDK (upstream Xenia:
+  true), so unclipped draws get full-scissor (8192) height. On the host-RT path that transfers the 3D
+  colour into a depth RT and back → black. fsi only uses ownership for barriers, so it was unaffected.
+- Fix: default true (`sdk/rexglue-rtv-unclipped-extent-fix.patch`). App default path is now `rtv`.
+
+| run | env | fps | ms/frame | draws | notes |
+|---|---|---|---|---|---|
+| fix-rtvsome-int0 | rtv, some, int0, cvar via env | 42.22 | 23.7 | 1785 | correct image incl. HUD; per-second min 37.5 / p5 38.0 / median 42.4 / max 44.9 |
+| fix-rtv-default | rtv, some, int0 (new default) | 39.67 | 25.2 | 1731 | correct image |
+| fix-fsi | fsi | 6.97 | 143.4 | 1632 | lower than 7.4–8.7 earlier today; not investigated |
+| speed-int0 | rtv, some, int0 | 43.01 | 23.2 | 1705 | |
+| speed-int1 | rtv, some | 31.28 | 32.0 | 1755 | |
+| speed-int1-rb2 | rtv, `RB_MAX_PER_DEST=2` | 32.65 | 30.6 | 1671 | |
+| speed-fsi-int0 | fsi, int0 | 9.87 | 101.3 | 1715 | |
+| play-vsync | rtv, int0, `RB_MAX_PER_DEST=2`, **vsync on** (`VSYNC=1`, bench v10) | 38.53 | 26.0 | 1605 | per-second min 29.1 / p5 30.2 / median 38.5 / max 47.1 |
+
+Fixing ownership also made rtv faster: 37.3 fps (broken, same env) → 42.2 fps.
+
+**Game speed with `NHL_SWAP_INTERVAL=0` is correct**: screenshots every 5–10 s, period clock advances
+6.0x real time at 9.9 fps (fsi) and 6.1x at 43 fps (rtv) → the game clock is time-based, not frame-locked.
+Screenshots at guest interval 1 (default) show the scoreboard without text in both paths, with interval 0
+the text is always there — likely a capture-timing artefact of the deferred flip (unverified in play).
+One play-vsync shot at 230 s (goal celebration) was a grey frame with green garbage; the 270 s shot is clean.
