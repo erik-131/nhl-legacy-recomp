@@ -27,9 +27,12 @@ Two apps in the Wolf `moonlight-profile-id` profile (`/etc/wolf/cfg/config.toml`
 - **Steam** - GoW Steam image, runner name `NHLSteam`.
 - **NHL Legacy** - same image, `/opt/gow/startup-app.sh` replaced by `nhl-linux/gow-startup-nhl.sh`
   (= `tools/nuc/ct105/gow-startup-nhl.sh`): sway runs `nhl_play.sh` directly, no Steam; the session ends with the game.
-Moonlight apps get `/etc/wolf/<client id>/<runner name>` as home, so for each paired client
-`NHLSteam` and `NHLDirect` are symlinks to `/etc/wolf/profile-data/user/WolfSteam` (same Steam login,
-game, saves). A newly paired client needs the two symlinks too. Don't run two of these sessions at once.
+Moonlight apps get `/etc/wolf/<client id>/<app title>` as home (the title, not the runner name), so for each
+paired client `Steam` and `NHL Legacy` are symlinks to `/etc/wolf/profile-data/user/WolfSteam` (same Steam
+login, game, saves). A newly paired client needs the two symlinks too, else it gets a fresh empty home
+(Steam asks to log in, NHL Legacy shows a grey screen). Don't run two of these sessions at once.
+Tile icons: `/etc/wolf/cfg/nhl_icon_title.png` (title screen), `/etc/wolf/cfg/steam_icon.png` - Moonlight caches
+box art per app id, and the id changes with the icon path, so use a new file name when changing an icon.
 Steam shortcuts: "NHL Legacy (Linux)" and "NHL Legacy (Linux, low latency)" (`REX_MAX_FRAMES_IN_FLIGHT=1`).
 
 ## Benchmark
