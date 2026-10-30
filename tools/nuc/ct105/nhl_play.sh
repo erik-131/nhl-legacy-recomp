@@ -8,6 +8,9 @@ cd "$(dirname "$0")" || exit 1
 export NHL_SWAP_INTERVAL="${NHL_SWAP_INTERVAL:-0}"
 export NHL_VK_READBACK_MODE="${NHL_VK_READBACK_MODE:-fast}"
 export NHL_NO_GUIDE="${NHL_NO_GUIDE:-1}"  # Guide button opens the Steam menu, not the in-game overlay
+# Present every guest frame from the guest output thread (no ImGui overlay/toasts registered);
+# otherwise UI-thread painting shows only ~half of the frames.
+export NHL_DIRECT_PRESENT="${NHL_DIRECT_PRESENT:-1}"
 # Movies: the VP6 bridge decodes with ffmpeg, which the GoW Steam image lacks (green movies).
 # A static ffmpeg is installed next to the binary (not in git).
 [ -x ./ffmpeg ] && export NHL_VP6_FFMPEG="${NHL_VP6_FFMPEG:-$PWD/ffmpeg}"

@@ -925,6 +925,21 @@ index aa55a4a..c668db2 100644
  XE_UI_VULKAN_FUNCTION(vkInvalidateMappedMemoryRanges)
  XE_UI_VULKAN_FUNCTION(vkMapMemory)
  XE_UI_VULKAN_FUNCTION(vkResetCommandPool)
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..5240a54 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -483,6 +483,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
++  // NHL: the mapping is only ever used through this fd, so drop the name right away.
++  // Otherwise a killed process (benchmark pkill, crash, hard-exit) leaves its multi-GB
++  // guest memory in /dev/shm until reboot - on the NUC that filled 15 GB of RAM.
++  shm_unlink(full_path.c_str());
+   return static_cast<FileMappingHandle>(ret);
+ #endif
+ }
 diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
 index 0d8f8af..6dc19af 100644
 --- a/src/graphics/CMakeLists.txt
@@ -4155,6 +4170,62 @@ index fc46d86..b5bfeb4 100644
 +if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include")
 +    target_compile_definitions(rexruntime PUBLIC REX_HAS_FIDELITYFX_SDK=1)
 +endif()
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..465ae00 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1300,6 +1300,10 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
+     std::lock_guard<std::mutex> lock(paint_mode_mutex_);
+     paint_mode_ = new_mode;
+   }
++  // [nhl-paintmode]: guest-thread immediate presents vs UI-thread paints on request (the
++  // latter caps the visible frame rate well below the guest's on the NUC).
++  REXLOG_INFO("[nhl-paintmode] mode={} implicit_vsync={} ui_drawers={}", int(new_mode),
++              surface_paint_connection_has_implicit_vsync_, ui_drawers_.size());
+   UpdateUITicksNeededFromUIThread();
+ }
+ 
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..bf9266e 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cmath>
+@@ -2240,7 +2241,28 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   {
+     const VulkanDevice::Queue::Acquisition queue_acquisition =
+         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
++    const auto nhl_t0 = std::chrono::steady_clock::now();
+     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
++    // [nhl-present]: what actually reaches the screen, once per second - host presents,
++    // the largest interval between presents and the time blocked inside vkQueuePresentKHR.
++    static auto win_start = nhl_t0, last = nhl_t0;
++    static uint32_t presents = 0, gaps_over_50 = 0;
++    static double max_gap_ms = 0.0, in_present_ms = 0.0;
++    const auto nhl_t1 = std::chrono::steady_clock::now();
++    const double gap_ms = std::chrono::duration<double, std::milli>(nhl_t0 - last).count();
++    last = nhl_t0;
++    ++presents;
++    max_gap_ms = std::max(max_gap_ms, gap_ms);
++    gaps_over_50 += gap_ms > 50.0;
++    in_present_ms += std::chrono::duration<double, std::milli>(nhl_t1 - nhl_t0).count();
++    const double win_ms = std::chrono::duration<double, std::milli>(nhl_t1 - win_start).count();
++    if (win_ms >= 1000.0) {
++      REXLOG_INFO("[nhl-present] presents={} fps={:.1f} max_gap={:.1f}ms gaps>50ms={} in_present={:.1f}ms",
++                  presents, presents * 1000.0 / win_ms, max_gap_ms, gaps_over_50, in_present_ms);
++      win_start = nhl_t1;
++      presents = gaps_over_50 = 0;
++      max_gap_ms = in_present_ms = 0.0;
++    }
+   }
+   switch (present_result) {
+     case VK_SUCCESS:
 diff --git a/src/ui/vulkan/vulkan_provider.cpp b/src/ui/vulkan/vulkan_provider.cpp
 index 9eeb902..f5343f3 100644
 --- a/src/ui/vulkan/vulkan_provider.cpp

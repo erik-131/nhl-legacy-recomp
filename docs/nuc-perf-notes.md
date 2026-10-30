@@ -196,3 +196,27 @@ Guide button fought with the Steam menu.
 | run | env | fps | ms/frame | per-second min / p5 / median / max |
 |---|---|---|---|---|
 | clean-play (Frigate off, no client) | rtv, int0, readback fast, vsync on, ffmpeg | **44.54** | 22.4 | 32.7 / 33.8 / 46.6 / 49.1 |
+
+## Presented frames ≠ guest frames; /dev/shm leak (2026-10-30 night)
+Erik saw < 30 fps in MangoHud while the log said ~50. New counter `[nhl-present]` at `vkQueuePresentKHR`
+(`sdk/rexglue-present-diag.patch`, with `[nhl-paintmode]`) shows the presenter dropping half the frames:
+
+| run (1080p session unless noted, vsync on, int0, readback fast) | guest fps p5 / median | **presented** fps p5 / median | gaps > 50 ms per min |
+|---|---|---|---|
+| pres2-1920x1080 | 36.2 / 56.0 | 18.2 / 28.5 | 159 |
+| pres2-3840x2160 (4K session) | 34.0 / 47.8 | 16.8 / 23.9 | 229 |
+| pres3 (enhancements overlay not registered) | 54.9 / 58.0 | 27.9 / 29.6 | 0 |
+| **pres5 `NHL_DIRECT_PRESENT=1`** | 30.3 / 45.8 | **30.1 / 46.2** | 1 |
+
+- Cause: any registered ImGui UI drawer forces `PaintMode::kUIThreadOnRequest`; UI-thread paints compete with
+  the game's GPU work and show ~every second frame. The app's enhancements overlay (registered while hidden, only
+  to poll Guide) and the SDK's achievement toast dialog (created at launch) both did that. `NHL_DIRECT_PRESENT=1`
+  (launcher default) registers neither → `kGuestOutputThreadImmediately`; costs the F1/Guide overlay and toasts.
+  Guest fps drops (presenting now happens on the guest output thread) but visible fps goes 28 → 46.
+- 4K streaming costs a further ~15 % — keep the Moonlight stream at 1080p.
+- **/dev/shm leak**: every killed run left its `xenia_memory_*` guest mapping (4.8 GB virtual) in /dev/shm —
+  15 GB resident after today's runs, the bench memory guard aborted. Likely the 10-29 CT hangs. Fix:
+  `shm_unlink` right after `shm_open` (`sdk/rexglue-shm-unlink-fix.patch`); /dev/shm now stays at 700 MB.
+- Intermittent boot stall: 3 bench runs today sat on the cloud screen (draws 60, ~267 fps, vpad presses ignored)
+  before the EA logo movie; 6 short boots + the next full run were fine; not the saves (moved aside: still OK and
+  stuck both happened). Not yet understood — the bench should get a stall watchdog with a gdb dump.

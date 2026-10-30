@@ -63,6 +63,7 @@ inline void SetEnv(const char* name, const char* value) {
 #include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/input/flags.h>         // guide_button cvar
 #include <rex/input/input.h>         // X_INPUT_STATE, X_INPUT_GAMEPAD_GUIDE
+#include <rex/ui/overlay/achievement_notification.h>  // CreateAchievementNotificationDialog override
 #include <rex/input/input_system.h>  // rex::input::InputSystem::GetState
 #include <rex/ui/imgui_drawer.h>     // OnCreateDialogs param
 #include "renderer/core/nhl_vk_backend.h"
@@ -670,8 +671,22 @@ class NhllegacyApp : public rex::ReXApp {
   // a controller poll (host-side InputSystem::GetState — catches both Xbox
   // XInput and PlayStation/SDL pads, both mapped to X_INPUT_GAMEPAD_GUIDE) and
   // the Vulkan fps/draws snapshot for the perf HUD.
+  // See OnCreateDialogs: the always-alive toast dialog would keep the ImGui drawer
+  // registered and force UI-thread presentation.
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog()
+      override {
+    if (std::getenv("NHL_DIRECT_PRESENT")) {
+      return nullptr;
+    }
+    return ReXApp::CreateAchievementNotificationDialog();
+  }
+
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-    if (!std::getenv("NHL_VK_BACKEND")) {
+    // NHL_DIRECT_PRESENT=1: no always-registered ImGui dialogs. Any registered UI drawer
+    // forces the presenter into UI-thread painting on request, which on the NUC shows ~28
+    // of ~56 guest frames in gameplay; without one the guest output thread presents every
+    // frame immediately. Costs the enhancements overlay (Guide/F1) and achievement toasts.
+    if (!std::getenv("NHL_VK_BACKEND") || std::getenv("NHL_DIRECT_PRESENT")) {
       return;  // enhancements overlay belongs to the Vulkan-fsi enhancement set
     }
     auto poll_pad = [this]() -> nhl::ui::PadState {
