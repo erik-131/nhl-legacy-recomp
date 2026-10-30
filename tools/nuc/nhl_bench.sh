@@ -3,7 +3,12 @@
 # Bruk: nhl_bench.sh <tag> [ekstra env]   (krever aktiv Wolf Steam-okt)
 TAG=${1:-run}; EXTRA="${2:-}"; DUR=${DUR:-285}
 W=/etc/wolf/profile-data/user/WolfSteam; B=$W/nhl-linux; OUT=/root/nhlbench; mkdir -p $OUT
-C=$(docker ps --format '{{.Names}}' | grep -i steam | head -1)
+# v12: never run inside a live Moonlight session (it would show on the TV and fight for the GPU):
+# abort if Wolf has an active stream session, and only use a headless WolfSteam_ lobby container.
+WS=/proc/$(pgrep -x wolf | head -1)/root/run/user/wolf/wolf.sock
+NS=$(curl -s --unix-socket $WS http://localhost/api/v1/sessions | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["sessions"]))' 2>/dev/null)
+[ "${NS:-0}" != 0 ] && { echo "Avbrutt: $NS aktiv(e) Moonlight-okt(er)" | tee $OUT/$TAG.txt; exit 1; }
+C=$(docker ps --format '{{.Names}}' | grep '^WolfSteam_' | head -1)
 [ -z "$C" ] && { echo "Ingen Steam-container (Moonlight-okt mangler)" | tee $OUT/$TAG.txt; exit 1; }
 AV=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
 [ "$AV" -lt "${MIN_AVAIL_MB:-4000}" ] && { echo "Avbrutt: bare ${AV} MB tilgjengelig minne (< ${MIN_AVAIL_MB:-4000})" | tee $OUT/$TAG.txt; exit 1; }
