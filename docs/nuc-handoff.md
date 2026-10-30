@@ -21,6 +21,17 @@ erik-131/nhl-legacy-recomp. All measurements: `docs/nuc-perf-notes.md`.
 - After the conversion check: `/dev/dri/renderD128` + render gid, `/dev/uinput` + `/dev/uhid` (virtual
   gamepad for the bench route), `nesting=1,keyctl=1`, docker works, Wolf session starts.
 
+## Moonlight tiles (2026-10-30, Erik's request)
+Two apps in the Wolf `moonlight-profile-id` profile (`/etc/wolf/cfg/config.toml`, backup in
+`/home/claude/nhl-backup/wolf-config.toml.*`; not in git - it holds client certs):
+- **Steam** - GoW Steam image, runner name `NHLSteam`.
+- **NHL Legacy** - same image, `/opt/gow/startup-app.sh` replaced by `nhl-linux/gow-startup-nhl.sh`
+  (= `tools/nuc/ct105/gow-startup-nhl.sh`): sway runs `nhl_play.sh` directly, no Steam; the session ends with the game.
+Moonlight apps get `/etc/wolf/<client id>/<runner name>` as home, so for each paired client
+`NHLSteam` and `NHLDirect` are symlinks to `/etc/wolf/profile-data/user/WolfSteam` (same Steam login,
+game, saves). A newly paired client needs the two symlinks too. Don't run two of these sessions at once.
+Steam shortcuts: "NHL Legacy (Linux)" and "NHL Legacy (Linux, low latency)" (`REX_MAX_FRAMES_IN_FLIGHT=1`).
+
 ## Benchmark
 `/root/nhlbench/nhl_bench.sh <tag> "<env>"` (= `tools/nuc/nhl_bench.sh`, v9). Time-based vpad route reaches
 gameplay ~178 s after the first fps line; window = 60 s of gameplay; screenshots at 230/270 s. Needs a Wolf
