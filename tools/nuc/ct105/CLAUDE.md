@@ -1,6 +1,6 @@
-# NHL Legacy — Claude Code inside CT 105 (Games on Whales, NUC)
+# NHL Legacy — Claude Code inside CT 115 (Games on Whales, NUC; formerly CT 105)
 
-You run directly in CT 105 (unprivileged LXC, Wolf + Docker, Arc iGPU). Goal: stable 60 fps in
+You run directly in CT 115 (unprivileged LXC, Wolf + Docker, Arc iGPU). Goal: stable 60 fps in
 gameplay on this NUC. Read `docs/nuc-handoff.md` (state + next steps) and `docs/nuc-perf-notes.md`
 (all measurements) before doing anything. Answer Erik in Norwegian, concise, with concrete numbers.
 

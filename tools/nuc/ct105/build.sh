@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build (and optionally deploy into the Wolf profile) inside CT 105. Usage: build.sh [--deploy]
+# Build (and optionally deploy into the Wolf profile) inside CT 115. Usage: build.sh [--deploy]
 set -euo pipefail
 cd /opt/nhl/nhl-legacy-recomp
 SDK=$PWD/third_party/rexglue-sdk-main

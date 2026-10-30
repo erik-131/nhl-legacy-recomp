@@ -1,9 +1,15 @@
 #!/bin/bash
-# One-time setup for running Claude Code + builds directly inside CT 105 (Games on Whales).
-# Usage (as root in CT 105): bash setup.sh   -> repo in /opt/nhl/nhl-legacy-recomp
+# One-time setup for running Claude Code + builds directly inside CT 115 (Games on Whales; formerly CT 105).
+# Usage (as root in CT 115): bash setup.sh   -> repo in /opt/nhl/nhl-legacy-recomp
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# Debian 13 (trixie) ships no clang-20: take it from apt.llvm.org.
+if ! apt-cache show clang-20 >/dev/null 2>&1; then
+  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key > /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+  echo "deb http://apt.llvm.org/$(. /etc/os-release; echo $VERSION_CODENAME)/ llvm-toolchain-$(. /etc/os-release; echo $VERSION_CODENAME)-20 main" > /etc/apt/sources.list.d/llvm-20.list
+  apt-get update -qq
+fi
 apt-get install -y -qq git curl ca-certificates xz-utils python3 cmake ninja-build pkg-config \
   clang-20 lld-20 llvm-20 libvulkan-dev glslang-tools spirv-tools libsnappy-dev \
   libx11-dev libx11-xcb-dev libxcb1-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev \

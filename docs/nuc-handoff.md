@@ -1,12 +1,14 @@
 # Handoff — NUC 60 fps work (resume here)
 
-Goal: stable 60 fps in gameplay on the NUC (Core Ultra 5 225H / Arc iGPU, Proxmox CT 105 =
-Games on Whales/Wolf, 192.168.0.22, 16 GB RAM) with the Linux build from branch `nuc-perf` of
+Goal: stable 60 fps in gameplay on the NUC (Core Ultra 5 225H / Arc iGPU, Proxmox CT 115 (was CT 105 before the
+unprivileged conversion) = Games on Whales/Wolf, 192.168.0.22, 16 GB RAM) with the Linux build from branch `nuc-perf` of
 erik-131/nhl-legacy-recomp. All measurements: `docs/nuc-perf-notes.md`.
 
-## Setup (as of 2026-10-29 evening)
-- CT 105 is being converted to an **unprivileged** LXC in place, and from now on Claude Code runs
-  **inside CT 105**. One-time setup there: `bash tools/nuc/ct105/setup.sh` (toolchain, Claude Code, repo in
+## Setup (as of 2026-10-30)
+- The Wolf CT is now **CT 115, unprivileged** (uid 0 → 100000), and Claude Code runs **inside it** as user
+  `claude` (sudo) via `claude remote-control`; the repo is `/home/claude/nhl-legacy-recomp` with
+  `/opt/nhl/nhl-legacy-recomp` symlinked to it. Debian 13 has no clang-20, so it comes from apt.llvm.org
+  (`llvm-toolchain-trixie-20`, 20.1.8). The `tools/nuc/ct105/` directory keeps its old name. One-time setup: `bash tools/nuc/ct105/setup.sh` (toolchain, Claude Code, repo in
   `/opt/nhl/nhl-legacy-recomp`, SDK = rexglue c94f5eb + `sdk/rexglue-nhl-nuc-combined.patch`, default.xex
   from the game install, bench script to `/root/nhlbench/`). Agent rules: `tools/nuc/ct105/CLAUDE.md`
   (copied to `CLAUDE.local.md`). Build/deploy: `tools/nuc/ct105/build.sh [--deploy]`.
