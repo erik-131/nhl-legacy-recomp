@@ -3,7 +3,8 @@
 set -euo pipefail
 cd /opt/nhl/nhl-legacy-recomp
 SDK=$PWD/third_party/rexglue-sdk-main
-DEST=/etc/wolf/profile-data/user/WolfSteam/nhl-linux
+# DEST_DIR=nhl-linux-dev deploys experiments without touching the playable nhl-linux install.
+DEST=/etc/wolf/profile-data/user/WolfSteam/${DEST_DIR:-nhl-linux}
 [ -x $SDK/out/linux-amd64/Release/rexglue ] || { (cd $SDK && cmake --preset linux-amd64 -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DREXGLUE_ENABLE_TRACY=OFF >/dev/null && ninja -C out/build/linux-amd64 -f build-Release.ninja rexglue:Release); }
 [ -d generated/default ] || $SDK/out/linux-amd64/Release/rexglue codegen nhllegacy_manifest.toml
 [ -f out/linux-rel/build.ninja ] || cmake -S . -B out/linux-rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -13,7 +14,8 @@ DEST=/etc/wolf/profile-data/user/WolfSteam/nhl-linux
 ninja -C out/linux-rel -j"${JOBS:-4}" nhllegacy
 if [ "${1:-}" = "--deploy" ]; then
   C=$(docker ps --format '{{.Names}}' | grep -i steam | head -1)
-  [ -n "$C" ] && docker exec "$C" pkill -x nhllegacy || true
+  # Only stop a running game when replacing the playable install (experiments go elsewhere).
+  [ "${DEST_DIR:-nhl-linux}" = nhl-linux ] && [ -n "$C" ] && docker exec "$C" pkill -x nhllegacy || true
   install -m 755 -o 1000 -g 1000 out/linux-rel/nhllegacy $DEST/nhllegacy
   install -m 755 -o 1000 -g 1000 $SDK/out/linux-amd64/librexruntime.so $SDK/out/linux-amd64/librexgpu-xenos.so $DEST/
   strip $DEST/nhllegacy $DEST/*.so

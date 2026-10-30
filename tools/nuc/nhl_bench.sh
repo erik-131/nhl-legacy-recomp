@@ -2,7 +2,7 @@
 # v11: bare vpad-en er synlig for spillet (SDL ignore-except), saa en tilkoblet Moonlight-kontroller ikke gjor vpad til spiller 2. v10: VSYNC=1 lar vsync staa paa (spilloppsett). v9: minnevern (MIN_AVAIL_MB, mem.log). v4: tidsstyrt rute (sekunder), malevindu funnet i loggen (>1000 draws/frame), skjermbilder ved 230 og 270 s.
 # Bruk: nhl_bench.sh <tag> [ekstra env]   (krever aktiv Wolf Steam-okt)
 TAG=${1:-run}; EXTRA="${2:-}"; DUR=${DUR:-285}
-W=/etc/wolf/profile-data/user/WolfSteam; B=$W/nhl-linux; OUT=/root/nhlbench; mkdir -p $OUT
+W=/etc/wolf/profile-data/user/WolfSteam; NDIR=${NHL_DIR:-nhl-linux}; B=$W/$NDIR; OUT=/root/nhlbench; mkdir -p $OUT
 # v12: never run inside a live Moonlight session (it would show on the TV and fight for the GPU):
 # abort if Wolf has an active stream session, and only use a headless WolfSteam_ lobby container.
 WS=/proc/$(pgrep -x wolf | head -1)/root/run/user/wolf/wolf.sock
@@ -18,7 +18,7 @@ docker exec "$C" pkill -x nhllegacy.exe; docker exec "$C" pkill -x nhllegacy; sl
 BEFORE=$(ls $B/logs/*.log 2>/dev/null | wc -l)
 START=$(date +%s)
 NOVS="NHL_VK_NO_VSYNC=1"; [ -n "${VSYNC:-}" ] && NOVS="NHL_VK_VSYNC_ON=1"
-docker exec -d -u retro -w /home/retro/nhl-linux "$C" env NHL_NO_SETUP_UI=1 REX_FENCE_WAIT_STATS=1 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=0x045E/0x028E $NOVS NHL_VPAD_SCRIPT='76:start:150,80:a:150,83:a:150,86:a:150,89:a:150,92:a:150,95:a:150,98:a:150,101:a:150,104:a:150,107:a:150,110:a:150,113:a:150,116:a:150,119:a:150,122:a:150,125:a:150,128:a:150,131:a:150,134:a:150,137:a:150,140:a:150,143:a:150,146:a:150,149:a:150,152:a:150,155:a:150,158:a:150,161:a:150,164:a:150,169:start:150,173:start:150,177:start:150' NHL_SHOT_AFTER_SEC=230,270 $EXTRA ./nhllegacy
+docker exec -d -u retro -w /home/retro/$NDIR "$C" env NHL_NO_SETUP_UI=1 REX_FENCE_WAIT_STATS=1 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT=0x045E/0x028E $NOVS NHL_VPAD_SCRIPT='76:start:150,80:a:150,83:a:150,86:a:150,89:a:150,92:a:150,95:a:150,98:a:150,101:a:150,104:a:150,107:a:150,110:a:150,113:a:150,116:a:150,119:a:150,122:a:150,125:a:150,128:a:150,131:a:150,134:a:150,137:a:150,140:a:150,143:a:150,146:a:150,149:a:150,152:a:150,155:a:150,158:a:150,161:a:150,164:a:150,169:start:150,173:start:150,177:start:150' NHL_SHOT_AFTER_SEC=230,270 $EXTRA ./nhllegacy
 while [ $(( $(date +%s)-START )) -lt $DUR ]; do sleep 5; docker exec "$C" pgrep -x nhllegacy >/dev/null || break
   E=$(( $(date +%s)-START )); if [ $E -ge 240 ] && [ ! -f $OUT/$TAG.threads ]; then P=$(pgrep -x nhllegacy | head -1); top -H -b -d 2 -n 2 -p $P | awk '/^top/{n++} n==2' | head -22 > $OUT/$TAG.threads; fi; done
 ALIVE=$(docker exec "$C" pgrep -x nhllegacy >/dev/null && echo ja || echo NEI)
