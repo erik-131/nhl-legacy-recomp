@@ -21,6 +21,17 @@
 //
 // Audio is untouched (the guest EA-audio path has always been correct); sync
 // is inherently guest-paced because we only swap pixels at publish time.
+//
+// Several players publish concurrently (in gameplay the arena-TV environment
+// movie keeps looping while a transition wipe plays, both 1024x512). Each
+// player has its own 4-slot descriptor ring, so decode state is kept PER RING:
+// the publish hook passes the ring-slot descriptor address, a newly opened
+// .vp6 is bound to the first ring that starts publishing after the open (a new
+// ring, or one whose previous movie has ended), and the other slots of that
+// ring follow it. A single shared stream used to hand the transition's frames
+// to the arena TV and vice versa, so the wipe starved and fell back to the
+// guest decoder's broken (IDCT-miscompiled) frames - the blocky black/white
+// wipes - and looped transition frames onto the TV afterwards.
 
 #include "vp6_bridge.h"
 
@@ -35,6 +46,8 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <fstream>
 #include <mutex>
 #include <system_error>
@@ -154,31 +167,29 @@ struct BridgeState {
   std::atomic<bool> eof{false};
   std::atomic<bool> reader_stop{false};
   uint64_t frames_served = 0;
+  std::vector<uint8_t> last;            // last frame written (underrun fallback)
+  unsigned long last_publish_ms = 0;
 };
-
-BridgeState& S() {
-  static BridgeState s;
-  return s;
-}
 
 constexpr size_t kMaxFrames = 24;             // decoded frames queued ahead
 constexpr size_t kMaxStaging = 32ull << 20;   // pre-first-publish cap
 
-void ReaderThread(PipeHandle pipe_rd) {
+void ReaderThread(BridgeState* sp, PipeHandle pipe_rd) {
+  BridgeState& st = *sp;
   std::vector<uint8_t> chunk(1 << 20);
   for (;;) {
-    if (S().reader_stop.load()) break;
+    if (st.reader_stop.load()) break;
     {
       // Backpressure: wait until the publish side drains the FIFO.
-      std::unique_lock<std::mutex> lk(S().m);
-      S().cv.wait_for(lk, std::chrono::milliseconds(100), [] {
-        return S().reader_stop.load() || S().frames.size() < kMaxFrames ||
-               (S().frame_size.load() == 0 &&
-                S().staging.size() < kMaxStaging);
+      std::unique_lock<std::mutex> lk(st.m);
+      st.cv.wait_for(lk, std::chrono::milliseconds(100), [&st] {
+        return st.reader_stop.load() || st.frames.size() < kMaxFrames ||
+               (st.frame_size.load() == 0 &&
+                st.staging.size() < kMaxStaging);
       });
-      if (S().reader_stop.load()) break;
-      if (S().frames.size() >= kMaxFrames) continue;
-      if (S().frame_size.load() == 0 && S().staging.size() >= kMaxStaging)
+      if (st.reader_stop.load()) break;
+      if (st.frames.size() >= kMaxFrames) continue;
+      if (st.frame_size.load() == 0 && st.staging.size() >= kMaxStaging)
         continue;
     }
     size_t got = 0;
@@ -195,13 +206,13 @@ void ReaderThread(PipeHandle pipe_rd) {
     if (n > 0) got = static_cast<size_t>(n);
 #endif
     if (!read_ok) {
-      S().eof.store(true);
-      std::lock_guard<std::mutex> lk(S().m);
-      S().cv.notify_all();
+      st.eof.store(true);
+      std::lock_guard<std::mutex> lk(st.m);
+      st.cv.notify_all();
       break;
     }
-    std::lock_guard<std::mutex> lk(S().m);
-    BridgeState& s = S();
+    std::lock_guard<std::mutex> lk(st.m);
+    BridgeState& s = st;
     s.staging.insert(s.staging.end(), chunk.data(), chunk.data() + got);
     size_t fs = s.frame_size.load();
     if (fs) {
@@ -217,8 +228,7 @@ void ReaderThread(PipeHandle pipe_rd) {
   }
 }
 
-void StopMovie() {
-  BridgeState& s = S();
+void StopMovie(BridgeState& s) {
   s.reader_stop.store(true);
   s.cv.notify_all();
 #ifdef _WIN32
@@ -259,9 +269,8 @@ std::string FfmpegPath() {
 #endif
 }
 
-bool StartMovie(const std::string& host_path) {
-  BridgeState& s = S();
-  StopMovie();
+bool StartMovie(BridgeState& s, const std::string& host_path) {
+  StopMovie(s);
   const std::string ffmpeg = FfmpegPath();
 #ifdef _WIN32
   SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -330,7 +339,7 @@ bool StartMovie(const std::string& host_path) {
 #endif
   s.host_path = host_path;
   s.frames_served = 0;
-  s.reader = std::thread(ReaderThread, s.pipe_rd);
+  s.reader = std::thread(ReaderThread, &s, s.pipe_rd);
   BridgeLog("spawned ffmpeg for %s", host_path.c_str());
   return true;
 }
@@ -390,10 +399,29 @@ std::string MapGuestPath(std::string g) {
 
 }  // namespace
 
-// Start (or switch) the decoder to whatever .vp6 the guest opened last. The
-// file open happens asynchronously AFTER the movie-setup call, so this runs
-// lazily from the publish hook too.
-static void MaybeStartFromEnv(const char* who) {
+// ---- per-ring stream registry -------------------------------------------------
+
+namespace {
+
+struct Registry {
+  std::mutex m;
+  std::map<uint32_t, std::shared_ptr<BridgeState>> by_ring;  // slot descriptor -> stream
+  std::string last_env_path;    // last .vp6 the guest opened (host path)
+  std::string pending;          // opened but not yet bound to a ring
+  uint64_t pending_since = 0;   // publish counter when it became pending
+  std::shared_ptr<BridgeState> recent;  // most recently bound stream
+  uint64_t recent_at = 0;       // publish counter when it was bound
+  uint64_t publishes = 0;
+};
+
+Registry& R() {
+  static Registry r;
+  return r;
+}
+
+// Record a newly opened movie (env vars set by the loose-tree device / the
+// SDK's NtCreateFile fallback). Caller holds R().m.
+void NoteOpenLocked(const char* who) {
   std::string host;
   if (const char* hp = std::getenv("NHL_VP6_LAST_OPEN_HOST"); hp && *hp) {
     host = hp;  // loose-tree open: already a host path
@@ -402,33 +430,101 @@ static void MaybeStartFromEnv(const char* who) {
     if (!guest || !*guest) return;
     host = MapGuestPath(guest);
   }
-  // Already decoding it - or already tried and failed (don't respawn per
-  // frame; StartMovie records the path on spawn failure).
-  if (host == S().host_path) return;
+  Registry& r = R();
+  if (host == r.last_env_path) return;
+  r.last_env_path = host;
   std::error_code exists_ec;
   const bool exists = std::filesystem::exists(host, exists_ec) && !exists_ec;
   BridgeLog("%s: host='%s' exists=%d", who, host.c_str(), exists ? 1 : 0);
   if (!exists) return;
-  StartMovie(host);
+  r.pending = host;
+  r.pending_since = r.publishes;
 }
+
+// Returns the stream the given ring slot should be fed from (null: leave the
+// guest's frame). Caller holds R().m.
+std::shared_ptr<BridgeState> StreamForRingLocked(uint32_t ring) {
+  Registry& r = R();
+  auto it = r.by_ring.find(ring);
+  std::shared_ptr<BridgeState> cur = it != r.by_ring.end() ? it->second : nullptr;
+  const bool cur_ended = cur && cur->eof.load() && cur->frames.empty();
+  // Bind a pending movie to the first ring that starts publishing: a ring we
+  // have not seen yet, or (after a few publishes, so a fresh ring wins the
+  // race) a ring whose movie ended - players reuse their ring for the next movie.
+  if (!r.pending.empty() &&
+      (!cur || (cur_ended && r.publishes - r.pending_since >= 4))) {
+    auto s = std::make_shared<BridgeState>();
+    StartMovie(*s, r.pending);
+    if (cur) {
+      // Move the whole ring (all slots that fed from the old movie).
+      for (auto& kv : r.by_ring)
+        if (kv.second == cur) kv.second = s;
+      StopMovie(*cur);
+    }
+    BridgeLog("bind ring=%08X%s -> %s", ring, cur ? " (reused)" : "", r.pending.c_str());
+    r.by_ring[ring] = s;
+    r.recent = s;
+    r.recent_at = r.publishes;
+    r.pending.clear();
+    return s;
+  }
+  if (cur) return cur;
+  // The other slots of a ring that was just bound show up within a few
+  // publishes.
+  if (r.recent && r.publishes - r.recent_at < 16) {
+    r.by_ring[ring] = r.recent;
+    return r.recent;
+  }
+  return nullptr;
+}
+
+// Stop streams no ring has published for a while (a finished transition's
+// respawned decoder would otherwise idle forever). Caller holds R().m.
+void ReapIdleLocked(unsigned long now_ms) {
+  Registry& r = R();
+  std::vector<std::shared_ptr<BridgeState>> idle;
+  for (auto it = r.by_ring.begin(); it != r.by_ring.end();) {
+    if (now_ms - it->second->last_publish_ms > 5000) {
+      idle.push_back(it->second);
+      it = r.by_ring.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto& s : idle)
+    if (ProcValid(s->proc)) StopMovie(*s);
+}
+
+}  // namespace
 
 void Vp6BridgeOnMovieSetup() {
   if (!BridgeOn()) return;
-  MaybeStartFromEnv("setup");
+  std::lock_guard<std::mutex> lk(R().m);
+  NoteOpenLocked("setup");
 }
 
-void Vp6BridgePublish(uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
+void Vp6BridgePublish(uint32_t ring, uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
                       uint32_t h, uint32_t y_pitch, uint32_t c_pitch) {
   if (!BridgeOn()) return;
-  MaybeStartFromEnv("publish");
-  BridgeState& s = S();
-  if (!s.proc) return;
+  const unsigned long now_ms = HostTickMs();
+  std::shared_ptr<BridgeState> sp;
+  {
+    std::lock_guard<std::mutex> lk(R().m);
+    NoteOpenLocked("publish");
+    sp = StreamForRingLocked(ring);
+    ++R().publishes;
+    if (sp) sp->last_publish_ms = now_ms;
+    if (R().publishes % 64 == 0) ReapIdleLocked(now_ms);
+  }
+  if (!sp || !ProcValid(sp->proc)) return;
+  BridgeState& s = *sp;
   const size_t ysz = size_t(w) * h;
   const size_t csz = size_t(w / 2) * (h / 2);
   const size_t fsz = ysz + 2 * csz;
   std::vector<uint8_t> frame;
+  bool served_new = true;
   {
-    std::lock_guard<std::mutex> lk(s.m);
+    std::unique_lock<std::mutex> lk(s.m);
     if (s.frame_size.load() != fsz) {
       // First publish (or dimension change): teach the reader the frame size
       // and slice whatever it staged so far.
@@ -441,6 +537,13 @@ void Vp6BridgePublish(uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
       }
       if (off) s.staging.erase(s.staging.begin(), s.staging.begin() + off);
     }
+    // The very first frame of a movie: ffmpeg needs a moment after the spawn.
+    // Wait briefly instead of showing the guest decoder's frame (the green
+    // flash at the start of the intro movie).
+    if (s.frames.empty() && s.frames_served == 0 && !s.eof.load()) {
+      s.cv.wait_for(lk, std::chrono::milliseconds(200),
+                    [&] { return !s.frames.empty() || s.eof.load(); });
+    }
     if (!s.frames.empty()) {
       frame = std::move(s.frames.front());
       s.frames.pop_front();
@@ -449,14 +552,20 @@ void Vp6BridgePublish(uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
   }
   if (frame.empty()) {
     if (s.eof.load()) {
-      // Movie looped (menu attract) - restart the decode from frame 0.
+      // Movie looped (menu attract, arena TV) - restart the decode from frame 0.
       std::string path = s.host_path;
       uint64_t served = s.frames_served;
       BridgeLog("eof after %llu frames - respawning %s",
                 (unsigned long long)served, path.c_str());
-      StartMovie(path);
+      StartMovie(s, path);
     }
-    return;  // underrun: keep the guest's own frame this once
+    // Underrun: repeat the last host frame rather than show the guest
+    // decoder's (broken) one.
+    if (s.last.size() != fsz) return;
+    frame = s.last;
+    served_new = false;
+  } else {
+    ++s.frames_served;
   }
   // The ring renders vertically flipped relative to write order: write frame
   // row r into plane row (h-1-r).
@@ -476,10 +585,10 @@ void Vp6BridgePublish(uint8_t* y, uint8_t* u, uint8_t* v, uint32_t w,
     for (uint32_t r = 0; r < ch; ++r)
       std::memcpy(v + size_t(ch - 1 - r) * c_pitch, fv + size_t(r) * cw, cw);
   }
-  ++s.frames_served;
-  if (s.frames_served % 120 == 0) {
-    BridgeLog("served %llu frames tick=%lu queue=%zu",
-              (unsigned long long)s.frames_served,
-              (unsigned long)HostTickMs(), s.frames.size());
+  s.last = std::move(frame);
+  if (served_new && s.frames_served % 120 == 0) {
+    BridgeLog("served %llu frames ring=%08X tick=%lu queue=%zu %s",
+              (unsigned long long)s.frames_served, ring,
+              (unsigned long)HostTickMs(), s.frames.size(), s.host_path.c_str());
   }
 }
