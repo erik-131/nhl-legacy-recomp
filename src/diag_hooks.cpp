@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
 // Diagnostic + debugging infrastructure for the NHL Legacy recomp.
 //
 // This file holds ONLY diagnostics/tooling — it contains no behavioral fixes.
@@ -33,7 +37,13 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifdef _WIN32
 #include <windows.h>
+#define NHL_BSWAP32(x) _byteswap_ulong(x)
+#else
+#include "win32_mem_compat.h"  // VirtualQuery/Sleep/GetTickCount stand-ins
+#define NHL_BSWAP32(x) __builtin_bswap32(x)
+#endif
 
 #include <rex/graphics/graphics_system.h>
 #include <rex/hook.h>
@@ -88,7 +98,7 @@ static bool SafeGuestLoadU32(uint8_t* base, uint32_t guest_addr,
   if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
   uint32_t raw;
   std::memcpy(&raw, host, 4);
-  *out = _byteswap_ulong(raw);
+  *out = NHL_BSWAP32(raw);
   return true;
 }
 
@@ -525,7 +535,7 @@ extern "C" REX_FUNC(sub_8277CC98) {
     auto host = [&](uint32_t ga) -> uint8_t* {
       return ga ? base + ga + REX_PHYS_HOST_OFFSET(ga) : nullptr;
     };
-    Vp6BridgePublish(host(desc[4]), host(desc[5]), host(desc[6]), r6, r7, yp,
+    Vp6BridgePublish(r9, host(desc[4]), host(desc[5]), host(desc[6]), r6, r7, yp,
                      cp);
   }
   if (pat_on && r6 >= 320 && r7 >= 180) {
@@ -625,6 +635,12 @@ extern "C" REX_FUNC(sub_827C2848) {
 // log the host RIP exe-relative (resolve against nhllegacy.pdb offline),
 // unprotect and re-arm on a timer -> vp6_trap.txt. Trap runs may show extra
 // visual glitches (we bypass the runtime's own watch invalidation) - fine.
+// The write-watch trap below is a Windows-only debugging aid: it uses a vectored
+// exception handler, VirtualProtect page guards, and x64 ContextRecord->Rip.
+// macOS/arm64 would need Mach exception ports and a different register, and it
+// is unrelated to normal playback (env-gated on NHL_VP6_TRAP), so it is simply
+// not built off-Windows.
+#ifdef _WIN32
 static uint32_t Vp6TrapAddr() {
   static uint32_t addr = [] {
     const char* e = std::getenv("NHL_VP6_TRAP");
@@ -771,6 +787,7 @@ static const int g_vp6_trap_init = [] {
   }).detach();
   return 0;
 }();
+#endif  // _WIN32 (VP6 write-watch trap)
 
 // Frame driver tap: dump the codec object (r3) at entry, find plane-candidate
 // pointers inside it (physical-alloc range), and dump a slice of each plane
@@ -797,7 +814,7 @@ static void ChunkTap(PPCContext& ctx, uint8_t* base) {
     for (size_t k = 0; k < got; k += 4) {
       uint32_t w;
       std::memcpy(&w, buf + k, 4);
-      std::fprintf(f, " %08X", _byteswap_ulong(w));
+      std::fprintf(f, " %08X", NHL_BSWAP32(w));
     }
     std::fprintf(f, "\n");
   }
@@ -1043,7 +1060,13 @@ static const int g_frame_trace_timer = [] {
         static_cast<rex::graphics::GraphicsSystem*>(rt->graphics_system());
     if (!gs) return;
     for (int i = 0; i < 40; ++i) {
+      // GraphicsSystem::RequestFrameTrace was removed from the SDK's public API
+      // in 0.10.x; this diagnostic needs rebasing onto whatever replaced it.
+#ifdef NHL_HAVE_SDK_FRAME_TRACE
       gs->RequestFrameTrace();
+#else
+      (void)gs;
+#endif
       std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     }
   }).detach();
@@ -1079,7 +1102,7 @@ static constexpr bool g_palette_dump = false;
     for (uint32_t off = 0; off < 0x1000; off += 4) {
       uint32_t raw;
       std::memcpy(&raw, phost + off, 4);
-      uint32_t v = _byteswap_ulong(raw);
+      uint32_t v = NHL_BSWAP32(raw);
       if (v == 0xFFFFFFFF) { white++; continue; }
       if (v == 0) { zero++; continue; }
       bool blk = ((v & 0x00FFFFFFu) == 0) || ((v & 0xFFFFFF00u) == 0);
@@ -1115,3 +1138,78 @@ static const int g_palette_dump_timer = [] {
   }).detach();
   return 0;
 }();
+
+// --- NHL_FENCE_SPIN_STATS=1: wall time the guest spends in the D3D fence wait --------
+// sub_827EDAB0 blocks until *(*(device+11024)) (CP scratch writeback) passes the fence
+// in r4, spinning through sub_827E2BC8 (db16cyc delay loop, a no-op when recompiled).
+// Logs once per second how many ms the calling threads spent inside it, so we can
+// tell "guest CPU-bound" from "guest waiting on the command processor".
+REX_EXTERN(__imp__sub_827EDAB0);
+extern "C" REX_FUNC(sub_827EDAB0) {
+  static const bool on = [] {
+    const char* e = std::getenv("NHL_FENCE_SPIN_STATS");
+    return e && *e && *e != '0';
+  }();
+  if (!on) {
+    __imp__sub_827EDAB0(ctx, base);
+    return;
+  }
+  const uint32_t caller_lr = uint32_t(ctx.lr);
+  const auto t0 = std::chrono::steady_clock::now();
+  __imp__sub_827EDAB0(ctx, base);
+  const auto t1 = std::chrono::steady_clock::now();
+  static std::mutex lr_mu;
+  static std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> lr_hist;
+  {
+    std::lock_guard<std::mutex> lk(lr_mu);
+    auto& h = lr_hist[caller_lr];
+    h.first += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    ++h.second;
+  }
+  static std::atomic<uint64_t> ns{0}, calls{0};
+  static std::atomic<int64_t> window_start{0};
+  ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  ++calls;
+  const int64_t now_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1.time_since_epoch()).count();
+  int64_t ws = window_start.load();
+  if (ws == 0) {
+    window_start.compare_exchange_strong(ws, now_ms);
+  } else if (now_ms - ws >= 1000 && window_start.compare_exchange_strong(ws, now_ms)) {
+    const uint64_t n = ns.exchange(0), c = calls.exchange(0);
+    std::string top;
+    {
+      std::lock_guard<std::mutex> lk(lr_mu);
+      std::vector<std::pair<uint32_t, std::pair<uint64_t, uint64_t>>> v(lr_hist.begin(),
+                                                                       lr_hist.end());
+      std::sort(v.begin(), v.end(),
+                [](auto& a, auto& b) { return a.second.first > b.second.first; });
+      for (size_t i = 0; i < v.size() && i < 5; ++i) {
+        top += fmt::format(" {:08X}:{:.0f}ms/{}", v[i].first, v[i].second.first / 1e6,
+                           v[i].second.second);
+      }
+      lr_hist.clear();
+    }
+    REXLOG_INFO("[nhl-fencespin] window={} ms calls={} in_wait={:.1f} ms ({:.0f}%) callers:{}",
+                now_ms - ws, c, n / 1e6, 100.0 * (n / 1e6) / double(now_ms - ws), top);
+  }
+}
+
+// --- NHL_SWAP_INTERVAL=<n>: override the guest D3D presentation interval -----------
+// sub_827F0D88 is the D3D swap callback the GPU stream invokes through a CP interrupt
+// (scratch4 = 827F0D88, scratch5 = arg, then WAIT_REG_MEM until scratch1 == 0). Bits
+// 8..11 of the arg are the presentation interval: with interval 1 the callback defers
+// the flip (and the CP!) to the next vblank, so a frame whose CP work takes ~20 ms is
+// quantized to two vblanks (~30 fps). Forcing 0 flips immediately; the host swapchain
+// still paces presentation.
+REX_EXTERN(__imp__sub_827F0D88);
+extern "C" REX_FUNC(sub_827F0D88) {
+  static const int forced = [] {
+    const char* e = std::getenv("NHL_SWAP_INTERVAL");
+    return (e && *e) ? int(std::strtol(e, nullptr, 10)) : -1;
+  }();
+  if (forced >= 0 && forced <= 15) {
+    ctx.r3.u64 = (ctx.r3.u64 & ~uint64_t(0xF00)) | (uint64_t(forced) << 8);
+  }
+  __imp__sub_827F0D88(ctx, base);
+}

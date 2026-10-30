@@ -1,0 +1,61 @@
+From 3de9303420296066f3cf2c3dfb5987305cecf67b Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Fri, 30 Oct 2026 19:40:55 +0100
+Subject: [PATCH] NHL: REX_MAX_FRAMES_IN_FLIGHT cap + [nhl-latency]
+ frames-ahead metric
+
+---
+ src/graphics/vulkan/command_processor.cpp | 30 +++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index d8220f6..533fe37 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -5823,6 +5823,19 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   // is still available, and whether the await was successful.
+   uint64_t await_submission =
+       is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
++  // NHL: REX_MAX_FRAMES_IN_FLIGHT=1|2 lets the CPU run fewer frames ahead of the GPU than
++  // kMaxFramesInFlight (each queued frame is a frame of input latency).
++  static const uint64_t nhl_max_frames_in_flight = [] {
++    const char* e = std::getenv("REX_MAX_FRAMES_IN_FLIGHT");
++    const long v = (e && *e) ? std::strtol(e, nullptr, 10) : long(kMaxFramesInFlight);
++    return uint64_t(std::clamp(v, 1L, long(kMaxFramesInFlight)));
++  }();
++  if (is_opening_frame && nhl_max_frames_in_flight < kMaxFramesInFlight &&
++      frame_current_ >= nhl_max_frames_in_flight) {
++    await_submission = std::max(
++        await_submission,
++        closed_frame_submissions_[(frame_current_ - nhl_max_frames_in_flight) % kMaxFramesInFlight]);
++  }
+   nhl_fence_wait_is_frame_ = is_opening_frame;
+   CheckSubmissionFenceAndDeviceLoss(await_submission);
+   nhl_fence_wait_is_frame_ = false;
+@@ -5841,6 +5854,23 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+       }
+       frame_completed_ = frame;
+     }
++    // [nhl-latency]: frames the CPU is ahead of the GPU when it opens a new frame (after
++    // the await above), averaged per second - each one is a frame of input latency.
++    {
++      static auto win = std::chrono::steady_clock::now();
++      static uint64_t frames = 0, depth_sum = 0, depth_max = 0;
++      const uint64_t depth = frame_current_ - frame_completed_ - 1;
++      ++frames;
++      depth_sum += depth;
++      depth_max = std::max(depth_max, depth);
++      const auto now = std::chrono::steady_clock::now();
++      if (now - win >= std::chrono::seconds(1)) {
++        REXGPU_INFO("[nhl-latency] frames_ahead avg={:.2f} max={} cap={}",
++                    double(depth_sum) / double(frames), depth_max, nhl_max_frames_in_flight);
++        win = now;
++        frames = depth_sum = depth_max = 0;
++      }
++    }
+   }
+ 
+   if (!submission_open_) {
+-- 
+2.47.3
+

@@ -1,0 +1,48 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 52afef2..1f82fca 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4767,6 +4767,43 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+     return true;  // GPU-side resolve already done; skip the CPU readback + drain
+   }
+ 
++  // NHL experiment (NHL_VK_RB_MAX_PER_DEST=N): read back each destination at most N
++  // times, then skip its CPU readback + drain. Hypothesis: the CPU-composited
++  // equipment textures are built when players spawn, not every gameplay frame, so
++  // repeated readbacks to the same dest are wasted drains. Validate visually.
++  // NHL_VK_RB_TRACE=1 logs, every ~5 s, the dests read back in that window.
++  static int64_t s_rb_max_per_dest = -1;
++  static int s_rb_trace = -1;
++  if (s_rb_max_per_dest < 0) {
++    const char* e = std::getenv("NHL_VK_RB_MAX_PER_DEST");
++    s_rb_max_per_dest = (e && *e) ? std::strtoll(e, nullptr, 0) : 0;
++    s_rb_trace = std::getenv("NHL_VK_RB_TRACE") ? 1 : 0;
++  }
++  {
++    static std::unordered_map<uint32_t, uint64_t> s_dest_count;
++    uint64_t& c = s_dest_count[written_address];
++    ++c;
++    if (s_rb_trace) {
++      static std::unordered_map<uint64_t, uint32_t> s_window;  // (addr<<32|len) -> count
++      static auto s_t0 = std::chrono::steady_clock::now();
++      ++s_window[(uint64_t(written_address) << 32) | written_length];
++      const auto now = std::chrono::steady_clock::now();
++      if (now - s_t0 >= std::chrono::seconds(5)) {
++        std::string line;
++        for (const auto& kv : s_window) {
++          line += fmt::format(" {:08X}/{}KB x{}", uint32_t(kv.first >> 32),
++                              uint32_t(kv.first) >> 10, kv.second);
++        }
++        REXGPU_INFO("[nhl-rbtrace] 5s:{}", line);
++        s_window.clear();
++        s_t0 = now;
++      }
++    }
++    if (s_rb_max_per_dest > 0 && c > uint64_t(s_rb_max_per_dest)) {
++      return true;  // already read back enough times for this dest
++    }
++  }
++
+   auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
+     if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
+         readback.mapped_data[index] != nullptr) {

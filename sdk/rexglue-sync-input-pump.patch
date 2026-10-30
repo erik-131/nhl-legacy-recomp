@@ -1,0 +1,52 @@
+From de5124214371a6b289035cd5d691f2ecd5e0fd73 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Fri, 30 Oct 2026 22:11:21 +0100
+Subject: [PATCH] NHL: REX_SYNC_INPUT_PUMP synchronous SDL event pump before
+ input reads
+
+---
+ src/input/sdl/sdl_input_driver.cpp | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index c7c440d..87ae3ce 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -9,6 +9,9 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
++#include <chrono>
++#include <atomic>
+ #include <array>
+ #include <filesystem>
+ 
+@@ -669,6 +672,24 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
+ }
+ 
+ void SDLInputDriver::QueueControllerUpdate() {
++  // NHL: REX_SYNC_INPUT_PUMP=1 pumps synchronously on the UI thread before the state is read,
++  // so a press is visible to the guest in the same poll instead of the next one (at most once
++  // per millisecond - the guest polls all four users back to back).
++  static const bool sync_pump = [] {
++    const char* e = std::getenv("REX_SYNC_INPUT_PUMP");
++    return e && *e && *e != '0';
++  }();
++  if (sync_pump) {
++    static std::atomic<int64_t> last_pump_ns{0};
++    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++    if (now_ns - last_pump_ns.load(std::memory_order_relaxed) > 1000000) {
++      last_pump_ns.store(now_ns, std::memory_order_relaxed);
++      attached_window_->app_context().CallInUIThreadSynchronous([]() { SDL_PumpEvents(); });
++      return;
++    }
++  }
+   // Pump SDL events to ensure controller state is up to date.
+   bool is_queued = false;
+   sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
+-- 
+2.47.3
+

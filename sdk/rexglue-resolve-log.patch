@@ -1,0 +1,180 @@
+From 76281b3ade893a77f716c8ff4365e1c73bcdf12d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 17:00:01 +0100
+Subject: [PATCH] diag: REX_RESOLVE_LOG_AT - per-frame resolve + draw-state log
+ for fsi/rtv diffing
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQAuyvWexFM1CJknxUd7jY
+---
+ src/graphics/vulkan/command_processor.cpp | 106 +++++++++++++++++++++-
+ 1 file changed, 102 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 14ae965..5633049 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2279,6 +2279,52 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
+ }
+ 
++// ---- NHL diag: REX_RESOLVE_LOG_AT=<seconds> ----------------------------------------
++// Logs every resolve of ONE frame (the first full frame after <seconds>) with its raw
++// RB_* registers, the written range and - once the readback has landed in guest memory
++// (sync readback: NHL_VK_READBACK_MODE=full REX_NO_READBACK_DEFER=1
++// NHL_VK_READBACK_MAX_LEN=0) - content statistics, so the fsi and rtv paths can be
++// diffed resolve by resolve. [nhl-reslog]
++namespace {
++int nhl_reslog_state = 0;  // 0 waiting, 1 armed, 2 logging, 3 done
++uint32_t nhl_reslog_index = 0;
++uint32_t nhl_reslog_draws = 0;
++bool NhlResLogTimeReached() {
++  static const double at = [] {
++    const char* e = std::getenv("REX_RESOLVE_LOG_AT");
++    return (e && *e) ? std::strtod(e, nullptr) : -1.0;
++  }();
++  if (at < 0) return false;
++  static const auto t0 = std::chrono::steady_clock::now();
++  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= at;
++}
++void NhlResLogOnSwap() {
++  if (nhl_reslog_state == 1) {
++    nhl_reslog_state = 2;
++    nhl_reslog_index = 0;
++    nhl_reslog_draws = 0;
++    REXGPU_INFO("[nhl-reslog] ---- frame begin ----");
++  } else if (nhl_reslog_state == 2) {
++    nhl_reslog_state = 3;
++    REXGPU_INFO("[nhl-reslog] ---- frame end ({} resolves, {} draws) ----", nhl_reslog_index,
++                nhl_reslog_draws);
++  }
++}
++void NhlResLogContent(uint32_t idx, uint32_t addr, const uint8_t* p, uint32_t len) {
++  uint64_t sum = 0, nz = 0, n = 0;
++  uint32_t h = 2166136261u;
++  for (uint32_t i = 0; i < len; i += 7) {
++    const uint8_t b = p[i];
++    sum += b;
++    nz += b != 0;
++    ++n;
++    h = (h ^ uint32_t(p[i] | (p[i + 1 < len ? i + 1 : i] << 8))) * 16777619u;
++  }
++  REXGPU_INFO("[nhl-reslog] #{} {:08X} content mean={:.1f} nonzero={:.1f}% hash={:08X}", idx, addr,
++              n ? double(sum) / n : 0.0, n ? 100.0 * nz / n : 0.0, h);
++}
++}  // namespace
++
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
+@@ -2299,6 +2345,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     return;
+   }
+   NhlGpuMark(kNhlGpuSwap);
++  NhlResLogOnSwap();
+ 
+   bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
+                                             REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
+@@ -4349,6 +4396,32 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // After all commands that may dispatch, copy or insert barriers, submit
+   // the barriers (may end the render pass), and (re)enter the render pass
+   // before drawing.
++  ++nhl_reslog_draws;
++  if (nhl_reslog_state == 2) {
++    const RegisterFile& r = *register_file_;
++    const uint32_t t[9] = {render_target_cache_->last_update_render_pass_key().key,
++                           r.values[XE_GPU_REG_RB_SURFACE_INFO],
++                           r.values[XE_GPU_REG_RB_COLOR_INFO],
++                           r.values[XE_GPU_REG_RB_DEPTH_INFO],
++                           r.values[XE_GPU_REG_RB_DEPTHCONTROL],
++                           r.values[XE_GPU_REG_RB_COLOR_MASK],
++                           r.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
++                           r.values[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
++                           r.values[XE_GPU_REG_RB_MODECONTROL]};
++    static uint32_t last[9] = {};
++    static uint32_t run = 0;
++    if (std::memcmp(t, last, sizeof(t)) != 0) {
++      if (run) {
++        REXGPU_INFO("[nhl-reslog] draws x{} rp={:08X} surf={:08X} c0={:08X} depth={:08X} "
++                    "dctl={:08X} cmask={:08X} win_off={:08X} sc_mode={:08X} modectl={:08X}",
++                    run, last[0], last[1], last[2], last[3], last[4], last[5], last[6], last[7],
++                    last[8]);
++      }
++      std::memcpy(last, t, sizeof(t));
++      run = 0;
++    }
++    ++run;
++  }
+   NhlGpuMark(kNhlGpuDraw);
+   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+       render_target_cache_->last_update_render_pass(),
+@@ -4690,14 +4763,34 @@ bool VulkanCommandProcessor::IssueCopy() {
+   return readback_ok;
+ }
+ 
++
+ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+ 
+   uint32_t written_address, written_length;
+-  if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
+-                                     written_length)) {
++  const bool nhl_resolve_ok = render_target_cache_->Resolve(*memory_, *shared_memory_,
++                                                            *texture_cache_, written_address,
++                                                            written_length);
++  if (nhl_reslog_state == 0 && NhlResLogTimeReached()) nhl_reslog_state = 1;
++  const uint32_t nhl_res_idx = nhl_reslog_index;
++  if (nhl_reslog_state == 2) {
++    const RegisterFile& r = *register_file_;
++    REXGPU_INFO("[nhl-reslog] #{} ok={} draws_before={} written={:08X}+{:X} copy_ctl={:08X} "
++                "dest_base={:08X} dest_pitch={:08X} dest_info={:08X} surf={:08X} c0={:08X} "
++                "c1={:08X} depth={:08X} win_off={:08X}",
++                nhl_reslog_index, nhl_resolve_ok, nhl_reslog_draws,
++                nhl_resolve_ok ? written_address : 0, nhl_resolve_ok ? written_length : 0,
++                r.values[XE_GPU_REG_RB_COPY_CONTROL], r.values[XE_GPU_REG_RB_COPY_DEST_BASE],
++                r.values[XE_GPU_REG_RB_COPY_DEST_PITCH], r.values[XE_GPU_REG_RB_COPY_DEST_INFO],
++                r.values[XE_GPU_REG_RB_SURFACE_INFO], r.values[XE_GPU_REG_RB_COLOR_INFO],
++                r.values[XE_GPU_REG_RB_COLOR1_INFO], r.values[XE_GPU_REG_RB_DEPTH_INFO],
++                r.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET]);
++    ++nhl_reslog_index;
++    nhl_reslog_draws = 0;
++  }
++  if (!nhl_resolve_ok) {
+     return false;
+   }
+ 
+@@ -4736,7 +4829,8 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+     const char* e = std::getenv("NHL_VK_READBACK_MAX_LEN");
+     s_rb_max_len = (e && *e) ? std::strtoll(e, nullptr, 0) : 0;
+   }
+-  const bool size_skip = (s_rb_max_len > 0 && written_length > uint32_t(s_rb_max_len));
++  const bool size_skip = (s_rb_max_len > 0 && written_length > uint32_t(s_rb_max_len)) &&
++                         nhl_reslog_state != 2;
+ 
+   // Diagnostic (NHL_VK_RB_STATS): per-destination resolve sizes, so the size gate
+   // can be validated/tuned in any scene — "largest_kept" is the biggest dest the
+@@ -4868,7 +4962,8 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+   // the unscaled path is deferred - the resolution-scaled path reads from a
+   // separate downscale buffer and keeps the original behaviour.
+   static const bool defer_readback = std::getenv("REX_NO_READBACK_DEFER") == nullptr;
+-  if (defer_readback && !is_scaled && readback_mode == ReadbackResolveMode::kFull) {
++  if (defer_readback && !is_scaled && readback_mode == ReadbackResolveMode::kFull &&
++      nhl_reslog_state != 2) {
+     constexpr uint32_t kArenaAlignment = 256;
+     const uint32_t aligned_length =
+         (written_length + (kArenaAlignment - 1)) & ~(kArenaAlignment - 1);
+@@ -5112,6 +5207,9 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+     uint8_t* destination = memory_->TranslatePhysical(written_address);
+     if (destination) {
+       std::memcpy(destination, readback.mapped_data[read_index], written_length);
++      if (nhl_reslog_state == 2) {
++        NhlResLogContent(nhl_res_idx, written_address, destination, written_length);
++      }
+     }
+   }
+ 
+-- 
+2.43.0
+

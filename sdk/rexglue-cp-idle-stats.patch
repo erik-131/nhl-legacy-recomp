@@ -1,0 +1,83 @@
+From 1ca5e010c15008556165bc062b1e75230dd547c0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 14:43:34 +0100
+Subject: [PATCH] diag: REX_CP_IDLE_STATS - CP worker idle time and kicks per
+ stall
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HQAuyvWexFM1CJknxUd7jY
+---
+ src/graphics/command_processor.cpp | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index ee28186..e8ee899 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstdlib>
+@@ -219,6 +220,7 @@ void CommandProcessor::WorkerThreadMain() {
+     return;
+   }
+ 
++  uint64_t kicks_since_stall = 0;  // NHL diag (REX_CP_IDLE_STATS)
+   while (worker_running_) {
+     while (!pending_fns_.empty()) {
+       auto fn = std::move(pending_fns_.front());
+@@ -229,6 +231,7 @@ void CommandProcessor::WorkerThreadMain() {
+     uint32_t write_ptr_index = write_ptr_index_.load();
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
++      const auto stall_t0 = std::chrono::steady_clock::now();
+       // We've run out of commands to execute.
+       // We spin here waiting for new ones, as the overhead of waiting on our
+       // event is too high.
+@@ -248,6 +251,31 @@ void CommandProcessor::WorkerThreadMain() {
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
+       ReturnFromWait();
++      // NHL diag (REX_CP_IDLE_STATS=1): time the CP thread sits idle with no new
++      // commands from the guest, and how many times per second it ran dry.
++      {
++        static const bool idle_stats = [] {
++          const char* e = std::getenv("REX_CP_IDLE_STATS");
++          return e && *e && *e != '0';
++        }();
++        if (idle_stats) {
++          static uint64_t idle_ns = 0, stalls = 0, kicks = 0;
++          static auto window_start = std::chrono::steady_clock::now();
++          const auto now = std::chrono::steady_clock::now();
++          idle_ns += uint64_t(
++              std::chrono::duration_cast<std::chrono::nanoseconds>(now - stall_t0).count());
++          ++stalls;
++          kicks += kicks_since_stall;
++          kicks_since_stall = 0;
++          const double w = std::chrono::duration<double>(now - window_start).count();
++          if (w >= 1.0) {
++            REXGPU_INFO("[nhl-cpidle] window={:.2f}s idle={:.1f} ms ({:.0f}%) stalls={} kicks={}",
++                        w, idle_ns / 1e6, 100.0 * idle_ns / (w * 1e9), stalls, kicks);
++            idle_ns = stalls = kicks = 0;
++            window_start = now;
++          }
++        }
++      }
+       if (!worker_running_ || !pending_fns_.empty()) {
+         continue;
+       }
+@@ -255,6 +283,7 @@ void CommandProcessor::WorkerThreadMain() {
+     assert_true(read_ptr_index_ != write_ptr_index);
+ 
+     // Execute. Note that we handle wraparound transparently.
++    ++kicks_since_stall;
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+ 
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+-- 
+2.43.0
+

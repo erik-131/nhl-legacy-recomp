@@ -1,5 +1,10 @@
 #include "renderer/core/nhl_overlay.h"
 
+#include "src/input_map.h"
+#if defined(__APPLE__)
+#include "src/game_setup.h"
+#endif
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -18,6 +23,7 @@
 
 #include "renderer/core/nhl_input_gate.h"
 #include "renderer/core/nhl_settings.h"
+#include "renderer/core/nhl_scene_state.h"
 
 // SDK GPU cvars driven by the cheap-win knobs. draw_resolution_scale_* are
 // defined in the SDK texture cache and read at backend init (VulkanTextureCache::
@@ -195,6 +201,31 @@ void NhlEnhancementsDialog::OnDraw(ImGuiIO& io) {
       }
     }
 
+    // --- Controls (guest button remapping) ---
+    if (ImGui::CollapsingHeader("Controls")) {
+      DrawControlsSection(pad);
+    }
+
+#if defined(__APPLE__)
+    // --- Game data (macOS: the app unpacks the user's disc itself) ---
+    if (ImGui::CollapsingHeader("Game data")) {
+      const std::string path = nhl::ActiveGameDataPath().string();
+      ImGui::TextWrapped("%s", path.empty() ? "(not set)" : path.c_str());
+      ImGui::Spacing();
+      if (ImGui::Button("Use a different disc or folder...")) {
+        game_data_forgotten_ = nhl::ForgetGameDataPath();
+        game_data_notice_ = true;
+      }
+      if (game_data_notice_) {
+        ImGui::TextWrapped(
+            game_data_forgotten_
+                ? "Cleared. Quit and relaunch to pick a different disc image or folder."
+                : "Nothing to clear - this run was given an explicit path, so relaunch "
+                  "without --game_data_root to pick a different one.");
+      }
+    }
+#endif
+
     // --- Display ---
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
       // Display mode: Windowed vs Borderless Fullscreen. Toggles live (the app
@@ -247,6 +278,39 @@ void NhlEnhancementsDialog::OnDraw(ImGuiIO& io) {
       }
       ImGui::SameLine();
       ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "[restart]");
+
+      // Edge AA. The game's own edge-AA/bloom pass sharpens the flat 2D menu art
+      // but blows player and stick silhouettes out to white over the 3D scene.
+      // It is skipped by pixel-shader hash, which is a per-draw test, so unlike
+      // Supersampling above this switches live - no restart, no rebuild.
+      {
+        static const char* kEdgeAaModes[] = {"Auto (menus only)", "Always on", "Always off"};
+        int edge_aa = int(nhl::graphics::GetEdgeAaMode());
+        if (ImGui::Combo("Edge AA", &edge_aa, kEdgeAaModes, IM_ARRAYSIZE(kEdgeAaModes))) {
+          nhl::graphics::SetEdgeAaMode(nhl::graphics::NhlEdgeAaMode(edge_aa));
+          nhl::SaveEdgeAaMode(edge_aa);
+        }
+        const bool in_3d = nhl::graphics::ReadSceneKind() == nhl::graphics::NhlSceneKind::kScene3D;
+        ImGui::TextDisabled("scene: %s \xE2\x80\x94 pass currently %s",
+                            in_3d ? "gameplay/3D" : "menu/2D",
+                            (edge_aa == 1 || (edge_aa == 0 && !in_3d)) ? "on" : "off");
+      }
+
+      // Swap-time FXAA. Unlike Supersampling this is a present-time post-process,
+      // so it applies immediately - no restart. It smooths geometry edges, but
+      // it will NOT remove the fine checker on boards/glass/ice (that is
+      // sub-pixel undersampling, which only supersampling fixes), and being a
+      // whole-frame pass it also softens menu and HUD text.
+      {
+        static const char* kPost[] = {"Off", "FXAA", "FXAA extreme"};
+        int post = int(nhl::graphics::GetSwapPostEffect());
+        if (ImGui::Combo("Post AA", &post, kPost, IM_ARRAYSIZE(kPost))) {
+          nhl::graphics::SetSwapPostEffect(nhl::graphics::NhlSwapPostEffect(post));
+          nhl::SaveSwapPostEffect(post);
+        }
+        ImGui::TextDisabled("smooths edges; also softens text. does not fix the "
+                            "boards/glass shimmer - use Supersampling for that");
+      }
 
       // Soften shadows: restore bilinear filtering on the guest's depth/shadow
       // maps. Read per-draw in the texture cache, so this is live (no restart).
@@ -486,6 +550,99 @@ void NhlEnhancementsDialog::EnsureTunableIndex() {
 int NhlEnhancementsDialog::FindTunable(const char* name) const {
   auto it = tun_by_name_.find(name);
   return it == tun_by_name_.end() ? -1 : it->second;
+}
+
+// Controller remapping. The guest only understands an Xbox 360 pad, so each row
+// is "guest button <- physical button". Click Rebind, then press the physical
+// button you want to drive it.
+void NhlEnhancementsDialog::DrawControlsSection(const PadState& pad) {
+  using nhllegacy::CurrentInputMap;
+  using nhllegacy::GuestButton;
+  using nhllegacy::GuestButtonMask;
+  using nhllegacy::GuestButtonName;
+  using nhllegacy::kGuestButtonCount;
+
+  auto& map = CurrentInputMap();
+
+  ImGui::TextDisabled(pad.connected ? "Controller: connected"
+                                    : "Controller: none detected");
+  ImGui::TextDisabled(
+      "Rows read \"guest button <- physical button\". Press Rebind, then the "
+      "physical button to assign.");
+  ImGui::Separator();
+
+  // Capture: take the first managed physical button that went down after the
+  // rebind started (rebind_ignore_mask_ holds whatever was already down).
+  if (rebind_target_ >= 0) {
+    const uint16_t now = pad.buttons;
+    const uint16_t fresh = static_cast<uint16_t>(now & ~rebind_ignore_mask_);
+    rebind_ignore_mask_ = static_cast<uint16_t>(rebind_ignore_mask_ & now);
+    if (fresh) {
+      for (size_t i = 0; i < kGuestButtonCount; ++i) {
+        const uint16_t m = GuestButtonMask(static_cast<GuestButton>(i));
+        if (fresh & m) {
+          map.source[static_cast<size_t>(rebind_target_)] = m;
+          rebind_target_ = -1;
+          nhllegacy::SaveInputMap();
+          break;
+        }
+      }
+    }
+  }
+
+  if (ImGui::BeginTable("controls", 3, ImGuiTableFlags_SizingStretchProp)) {
+    for (size_t i = 0; i < kGuestButtonCount; ++i) {
+      const auto gb = static_cast<GuestButton>(i);
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      ImGui::Text("%s", GuestButtonName(gb));
+
+      ImGui::TableSetColumnIndex(1);
+      const uint16_t src = map.source[i];
+      const char* src_name = "(unbound)";
+      for (size_t j = 0; j < kGuestButtonCount; ++j) {
+        if (src == GuestButtonMask(static_cast<GuestButton>(j))) {
+          src_name = GuestButtonName(static_cast<GuestButton>(j));
+          break;
+        }
+      }
+      const bool held = src && (pad.buttons & src);
+      if (held) {
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", src_name);
+      } else {
+        ImGui::Text("%s", src_name);
+      }
+
+      ImGui::TableSetColumnIndex(2);
+      ImGui::PushID(static_cast<int>(i));
+      if (rebind_target_ == static_cast<int>(i)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "press a button...");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) rebind_target_ = -1;
+      } else if (ImGui::SmallButton("Rebind")) {
+        rebind_target_ = static_cast<int>(i);
+        rebind_ignore_mask_ = pad.buttons;  // ignore what is already held
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+  }
+
+  ImGui::Separator();
+  bool dirty = false;
+  dirty |= ImGui::Checkbox("Swap sticks (southpaw)", &map.swap_sticks);
+  dirty |= ImGui::Checkbox("Invert left stick Y", &map.invert_left_y);
+  dirty |= ImGui::Checkbox("Invert right stick Y (camera)", &map.invert_right_y);
+  dirty |= ImGui::Checkbox("Swap triggers (LT/RT)", &map.swap_triggers);
+  if (dirty) nhllegacy::SaveInputMap();
+
+  if (ImGui::Button("Reset to defaults")) {
+    map.ResetToDefaults();
+    rebind_target_ = -1;
+    nhllegacy::SaveInputMap();
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled("saved to nhl_input_map.ini");
 }
 
 void NhlEnhancementsDialog::DrawTunables() {

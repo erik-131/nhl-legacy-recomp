@@ -13,8 +13,10 @@
 
 #pragma once
 
+#include "renderer/core/nhl_scene_state.h"
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -36,6 +38,17 @@ struct NhlVkPerfSnapshot {
 };
 void PublishVkPerf(const NhlVkPerfSnapshot& snapshot);
 NhlVkPerfSnapshot ReadVkPerf();
+
+// Guest frames presented so far, published every frame (the perf snapshot above
+// only updates at 1 Hz). Capturing at an exact frame index rather than a
+// wall-clock time makes A/B captures between runs comparable: the guest is
+// driven by a fixed scripted input timeline, so frame N is the same moment.
+void PublishVkFrameIndex(uint64_t frame_index);
+uint64_t ReadVkFrameIndex();
+// Input-latency probe (NHL_LAT_PROBE=1): the virtual pad marks each scripted press; for
+// 600 ms after it every guest swap logs [nhl-lat] with the time since the press.
+void MarkInputPress();
+
 
 class NhlVkCommandProcessor : public rex::graphics::vulkan::VulkanCommandProcessor {
  public:
@@ -80,6 +93,32 @@ class NhlVkCommandProcessor : public rex::graphics::vulkan::VulkanCommandProcess
   // Cached env (resolved once): category skips + targeted overrides.
   bool exp_resolved_ = false;
   bool diag_active_ = false;  // any diagnostic/experiment on -> run the texture loop
+  // NHL_VK_RTLOG: render-surface geometry logging (see .cpp).
+  const bool rtlog_on_ = std::getenv("NHL_VK_RTLOG") != nullptr;
+  uint32_t last_rt_key_ = 0xFFFFFFFFu;
+  // NHL_VK_SKIP_TILE=A|B (see .cpp): drop one predicated-tiling pass.
+  const char skip_tile_ = []() -> char {
+    const char* e = std::getenv("NHL_VK_SKIP_TILE");
+    return (e && *e) ? *e : 0;
+  }();
+  // NHL_VK_RTLOG: log each EDRAM resolve (source tile -> guest dest rect).
+  bool IssueCopy() override;
+  uint32_t last_copy_key_ = 0xFFFFFFFFu;
+  const bool seqlog_on_ = std::getenv("NHL_VK_SEQLOG") != nullptr;
+  uint32_t last_seq_tile_ = 0xFFFFFFFFu;
+  const bool skip_unfold_ = std::getenv("NHL_VK_SKIP_UNFOLD") != nullptr;
+  uint32_t last_draw_pitch_ = 0;
+  // Scene detection: draws this frame against the 640-pitch (folded) 3D surface.
+  uint32_t folded_draws_this_frame_ = 0;
+  // Hysteresis so a single odd frame (a loading screen that briefly touches the
+  // scene surface, or a menu drawn over a paused rink) cannot flip the mode.
+  uint32_t scene_agree_frames_ = 0;
+  bool scene_is_3d_ = false;
+  void UpdateSceneKind();
+  bool auto_capturing_ = false;  // NHL_CAPTURE_AT_FRAME window in progress
+  // Last value pushed to the SDK, so the change is only submitted once.
+  NhlSwapPostEffect applied_swap_post_effect_ = NhlSwapPostEffect::kNone;
+  const bool copy_barrier_on_ = std::getenv("NHL_VK_COPY_BARRIER") != nullptr;
   bool exp_skip_dxt3_ = false, exp_skip_alphatest_ = false, exp_skip_blend_ = false;
   uint32_t exp_skip_addr_ = 0;   // NHL_VK_SKIP_ADDR (hex), 0 = off
   bool exp_ref_on_ = false; float exp_ref_ = 0.0f;     // NHL_VK_NET_REF
