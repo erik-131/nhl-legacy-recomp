@@ -175,3 +175,24 @@ Fixing ownership also made rtv faster: 37.3 fps (broken, same env) → 42.2 fps.
 Screenshots at guest interval 1 (default) show the scoreboard without text in both paths, with interval 0
 the text is always there — likely a capture-timing artefact of the deferred flip (unverified in play).
 One play-vsync shot at 230 s (goal celebration) was a grey frame with green garbage; the 270 s shot is clean.
+
+## Play-test feedback → readback, movies, Guide (2026-10-30 evening)
+Erik's play session (`nhllegacy_054.log`, rtv + `RB_MAX_PER_DEST=2`, vsync on, Frigate + 4K Moonlight on):
+gameplay fps min 7.4 / p5 26.7 / p25 34.1 / median 42.9 / max 52.8 — not smooth. Green fields in movies,
+transitions, arena TV and on equipment; black players in team select (also on the Windows build);
+Guide button fought with the Steam menu.
+- **`NHL_VK_RB_MAX_PER_DEST` is a lifetime cap per destination** — after 2 readbacks a resolve address is
+  never read back again, so recomposited equipment goes stale (green helmet in `rb-rb2` 260 s). Do not use.
+- Readback comparison (bench v11, vsync on, int0, shots every 10 s; Frigate on for rb2/full):
+  rb2 38.96 fps / full 29.15 / **fast 42.38**; equipment correct in full and fast.
+- **Green movies = no ffmpeg** in the GoW Steam image: `vp6_bridge.txt` `spawn FAILED rc=2`, so the movie
+  YUV planes stay zero. Static ffmpeg (BtbN n8.1, sha256-checked) in `nhl-linux/ffmpeg`, `NHL_VP6_FFMPEG`
+  set by `nhl_play.sh`; `setup.sh` installs it. Movies, intro and arena TV now clean.
+- `NHL_NO_GUIDE=1` (launcher default) leaves the Guide button to Steam.
+- Bench v11 hides every controller except the vpad (`SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT`); a lingering
+  Moonlight Xbox controller made all three first runs stall on the sign-in dialog.
+- With Frigate stopped and no Moonlight session the iGPU idles at 0 MHz (1.1–1.25 GHz before).
+
+| run | env | fps | ms/frame | per-second min / p5 / median / max |
+|---|---|---|---|---|
+| clean-play (Frigate off, no client) | rtv, int0, readback fast, vsync on, ffmpeg | **44.54** | 22.4 | 32.7 / 33.8 / 46.6 / 49.1 |

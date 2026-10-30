@@ -37,6 +37,14 @@ fi
 mkdir -p game
 [ -f game/default.xex ] || cp /etc/wolf/profile-data/user/WolfSteam/nhl/game/default.xex game/
 echo "d818eb15775c1fee34b057b0fc494b211535d07123230ee45bd7d40991c55624  game/default.xex" | sha256sum -c -
+# Static ffmpeg for the VP6 movie bridge (the GoW Steam image has no ffmpeg -> green movies).
+NL=/etc/wolf/profile-data/user/WolfSteam/nhl-linux
+if [ -d $NL ] && [ ! -x $NL/ffmpeg ]; then
+  T=$(mktemp -d); F=ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz; U=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+  (cd $T && curl -fsSLO $U/$F && curl -fsSLO $U/checksums.sha256 && grep " $F\$" checksums.sha256 | sha256sum -c - && tar xf $F)
+  install -m 755 -o 1000 -g 1000 $T/*/bin/ffmpeg $NL/ffmpeg; rm -rf $T
+fi
+install -m 755 -o 1000 -g 1000 tools/nuc/ct105/nhl_play.sh $NL/nhl_play.sh 2>/dev/null || true
 mkdir -p /root/nhlbench && cp tools/nuc/nhl_bench.sh /root/nhlbench/ && chmod +x /root/nhlbench/nhl_bench.sh
 cp tools/nuc/ct105/CLAUDE.md CLAUDE.local.md
 grep -qx "CLAUDE.local.md" .git/info/exclude || echo "CLAUDE.local.md" >> .git/info/exclude
