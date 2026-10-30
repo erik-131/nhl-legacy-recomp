@@ -276,3 +276,19 @@ per guest surface + deferred/aliased resolves (same idea as Simpsons' `native_rt
 resolves) — the next big candidate for our rt+resolve share (~25 %). Tekken 6's `vulkan_present_pacing`
 (VK_GOOGLE_display_timing) only helps at the display rate — revisit at 60 fps.
 Boot stall seen once more (cmps-A1); the A/B script now gdb-dumps all threads if the EA logo movie hasn't started at 110 s.
+
+## Input latency probe, RT transfer skipping, transitions (2026-10-30 late evening)
+- **Latency probe** (`NHL_LAT_PROBE=1`, `[nhl-lat]`): scripted START/A presses in gameplay every 3 s; the first frame
+  whose draw count changes ≥40 is the reaction. Quick reaction (resume/pause) ~90–116 ms from press to the frame
+  being swapped/presented (~6 frames at ~60 fps); GPU + display come on top. `REX_SYNC_INPUT_PUMP=1`
+  (synchronous SDL pump before XInput reads) made no measurable difference (A 104/92 ms vs B 116/108 ms) — the
+  rest looks game-side (logic/animation). Erik saw no difference with `REX_MAX_FRAMES_IN_FLIGHT=1` or the direct tile.
+- **RT transfers** (`REX_NHL_RT_TRANSFER_STATS=true`, `[nhl-xfer]`): ~0.8–0.9 M tiles/s, almost all 1x↔4x round
+  trips around the XDK 4x MSAA clear quads. `REX_NHL_RT_SKIP_OVERWRITTEN_TRANSFERS=true` (ported from the Simpsons
+  recomp, CPU vertex-shader overwrite proof) drops the 1x→4x colour+depth copies (~0.7 M tiles/s); images identical
+  with `REX_NHL_RT_DEBUG_POISON_OVERWRITES=true`. Interleaved A/B: presented median 62.3/62.1 → 64.4/65.3,
+  **p5 36.3/36.8 → 60.4/58.9**. Launcher default. Next: the remaining 4x→1x copy-back (design step 2, clear-through).
+- **Transitions / intro green**: VP6 bridge now one ffmpeg stream per movie player ring (bind lines per ring),
+  holds the last frame on shortfall, waits up to 200 ms for the first frame. Intro clean in screenshots.
+- Boot stall pattern: every stall so far was the first game start after a fresh Steam container (lat1 again);
+  stalls during loading right after `gps.big`, before `realai/*.def`.

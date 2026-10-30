@@ -17,6 +17,9 @@ export NHL_DIRECT_PRESENT="${NHL_DIRECT_PRESENT:-1}"
 # Don't re-upload every guest buffer each frame (the Simpsons recomp's first memory step):
 # visible fps median 46 -> 61 over 5 interleaved runs each. Set to true if stale geometry shows up.
 export REX_CLEAR_MEMORY_PAGE_STATE="${REX_CLEAR_MEMORY_PAGE_STATE:-false}"
+# Skip EDRAM ownership transfers into areas the next draw provably overwrites (the XDK's 4x MSAA
+# clear quads): presented fps p5 36 -> 60 over 2 interleaved runs each. Set to false if a pass looks wrong.
+export REX_NHL_RT_SKIP_OVERWRITTEN_TRANSFERS="${REX_NHL_RT_SKIP_OVERWRITTEN_TRANSFERS:-true}"
 # REX_PRESENT_THREAD=1 (dedicated present thread) is off: no measurable fps gain over run-to-run
 # variance, and play-testing felt laggier. Steam launch options, "<VAR>=<value> %command%":
 #   NHL_SWAP_INTERVAL=2           steady 30 fps lock
