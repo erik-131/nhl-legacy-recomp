@@ -292,3 +292,19 @@ Boot stall seen once more (cmps-A1); the A/B script now gdb-dumps all threads if
   holds the last frame on shortfall, waits up to 200 ms for the first frame. Intro clean in screenshots.
 - Boot stall pattern: every stall so far was the first game start after a fresh Steam container (lat1 again);
   stalls during loading right after `gps.big`, before `realai/*.def`.
+
+## Night of 2026-10-31 (autonomous, experiments in nhl-linux-dev)
+Playable build tagged `playable-2026-10-31`, backup `/home/claude/nhl-backup/stable-20261031`; experiments deploy to
+`nhl-linux-dev` (`DEST_DIR`, bench `NHL_DIR`).
+- `[nhl-present]` now has a present-interval histogram (≤17/≤20/≤25/≤34/>34 ms).
+- **vsync-locked 60** (guest interval 1) vs interval 0, 2 runs each: interval 0 has ~71 % of frames ≤17 ms; the lock
+  turns the 20–34 ms frames into 33 ms drops (12–25 % at 25–34 ms, 2–7 % >34) → presented median 47–54 vs 63.6.
+  Not yet — needs GPU headroom first. Reaction time unchanged (~100 ms).
+- **Resolve use stats** (`NHL_RESOLVE_USE_STATS=1`, whole run): no resolve is safely skippable — the depth resolve
+  1A7D9000 is sampled in some scenes (3122 fetches), the right halves (1A7ED000, 1AF1D000) belong to textures that
+  start at the left half, 1AB71000 is fetched 23k times. Needs lazy resolve-on-first-use (Simpsons) — parked.
+- **RT clear-through** (`nhl_rt_clear_through`, NHL clear shaders VS 1E6883FCCDE1F688 / PS A4A965C189287B99 via
+  `nhl_rt_clear_vertex_shader_hash`/`..._pixel_shader_hash`): `[nhl-xfer] transfers=0 tiles=0`, cleared_through
+  ~720k tiles/s; images identical with poison (menus, gameplay, replay, close-up). A/B running.
+- Boot stall caught once more (vs60-A1): all guest threads blocked in NtWaitForSingleObjectEx / KeWaitFor*,
+  nobody runnable → lost wakeup; backtrace depth raised to 40 frames to see the guest functions next time.

@@ -1,0 +1,42 @@
+From 2394b1763d41f0178ac1a4ca143703097c5e08d2 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 00:04:25 +0100
+Subject: [PATCH] NHL diag: present-interval histogram in [nhl-present]
+
+---
+ src/ui/vulkan/vulkan_presenter.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index de5ae65..f3192cc 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -2249,6 +2249,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     // the largest interval between presents and the time blocked inside vkQueuePresentKHR.
+     static auto win_start = nhl_t0, last = nhl_t0;
+     static uint32_t presents = 0, gaps_over_50 = 0;
++    static uint32_t hist[5] = {};  // present-to-present: <=17, <=20, <=25, <=34, >34 ms
+     static double max_gap_ms = 0.0, in_present_ms = 0.0;
+     const auto nhl_t1 = std::chrono::steady_clock::now();
+     const double gap_ms = std::chrono::duration<double, std::milli>(nhl_t0 - last).count();
+@@ -2256,11 +2257,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     ++presents;
+     max_gap_ms = std::max(max_gap_ms, gap_ms);
+     gaps_over_50 += gap_ms > 50.0;
++    ++hist[gap_ms <= 17.0 ? 0 : gap_ms <= 20.0 ? 1 : gap_ms <= 25.0 ? 2 : gap_ms <= 34.0 ? 3 : 4];
+     in_present_ms += std::chrono::duration<double, std::milli>(nhl_t1 - nhl_t0).count();
+     const double win_ms = std::chrono::duration<double, std::milli>(nhl_t1 - win_start).count();
+     if (win_ms >= 1000.0) {
+-      REXLOG_INFO("[nhl-present] presents={} fps={:.1f} max_gap={:.1f}ms gaps>50ms={} in_present={:.1f}ms",
+-                  presents, presents * 1000.0 / win_ms, max_gap_ms, gaps_over_50, in_present_ms);
++      REXLOG_INFO("[nhl-present] presents={} fps={:.1f} max_gap={:.1f}ms gaps>50ms={} in_present={:.1f}ms "
++                  "hist={}/{}/{}/{}/{}",
++                  presents, presents * 1000.0 / win_ms, max_gap_ms, gaps_over_50, in_present_ms,
++                  hist[0], hist[1], hist[2], hist[3], hist[4]);
++      std::memset(hist, 0, sizeof(hist));
+       win_start = nhl_t1;
+       presents = gaps_over_50 = 0;
+       max_gap_ms = in_present_ms = 0.0;
+-- 
+2.47.3
+
