@@ -22,8 +22,8 @@ erik-131/nhl-legacy-recomp. All measurements: `docs/nuc-perf-notes.md`.
 ## Benchmark
 `/root/nhlbench/nhl_bench.sh <tag> "<env>"` (= `tools/nuc/nhl_bench.sh`, v9). Time-based vpad route reaches
 gameplay ~178 s after the first fps line; window = 60 s of gameplay; screenshots at 230/270 s. Needs a Wolf
-Steam session started once via Moonlight (Wolf UI → User → Steam → Start), then the client disconnected with
-ctrl+alt+shift+q so the session stays. Aborts if MemAvailable < 4 GB; memory per run logged in `mem.log`.
+Steam session: `tools/nuc/ct105/wolf_session.sh start` creates it headless via the Wolf API
+(`/api/v1/lobbies/create`, same as Wolf UI → User → Steam → Start; no Moonlight client needed). Aborts if MemAvailable < 4 GB; memory per run logged in `mem.log`.
 The CT hung twice today with memory "used" growing ~0.6–1.7 GB per run — watch `mem.log`.
 
 ## Key findings (2026-10-29)

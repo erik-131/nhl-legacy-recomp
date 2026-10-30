@@ -11,9 +11,10 @@ gameplay on this NUC. Read `docs/nuc-handoff.md` (state + next steps) and `docs/
   (and refresh the combined patch: `git -C third_party/rexglue-sdk-main diff --binary c94f5eb HEAD > sdk/rexglue-nhl-nuc-combined.patch`).
 - Build: `tools/nuc/ct105/build.sh` (SDK-only changes relink in seconds); deploy: `build.sh --deploy`.
   Keep `JOBS` ≤ 4 while the game runs — the CT hung twice from memory pressure.
-- Bench: `/root/nhlbench/nhl_bench.sh <tag> "<NHL_*/REX_* env>"` (~5 min). Needs a Wolf Steam session
-  started once via Moonlight with the client then disconnected (ctrl+alt+shift+q); a client with a controller
-  makes the vpad player 2 and the run stalls on the sign-in dialog. Results: `/root/nhlbench/<tag>.txt`.
+- Bench: `/root/nhlbench/nhl_bench.sh <tag> "<NHL_*/REX_* env>"` (~5 min, run with sudo). Needs a Wolf Steam
+  session: start it headless with `tools/nuc/ct105/wolf_session.sh start` (Wolf API lobby, no Moonlight needed;
+  `stop`/`status` too). A Moonlight client with a controller makes the vpad player 2 and the run stalls on the
+  sign-in dialog. Results: `/root/nhlbench/<tag>.txt`.
   Before a run check `free -m` (abort if available < 4 GB).
 - Verify with screenshots (`shot_230s.png`/`shot_270s.png` in the nhl-linux dir) — rtv shots are black.
 
