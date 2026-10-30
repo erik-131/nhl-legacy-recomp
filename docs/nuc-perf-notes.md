@@ -220,3 +220,19 @@ Erik saw < 30 fps in MangoHud while the log said ~50. New counter `[nhl-present]
 - Intermittent boot stall: 3 bench runs today sat on the cloud screen (draws 60, ~267 fps, vpad presses ignored)
   before the EA logo movie; 6 short boots + the next full run were fine; not the saves (moved aside: still OK and
   stuck both happened). Not yet understood — the bench should get a stall watchdog with a gdb dump.
+
+## Dedicated present thread (2026-10-30 night)
+`REX_PRESENT_THREAD=1` (`sdk/rexglue-present-thread.patch`): in `kGuestOutputThreadImmediately` mode the guest
+output thread only signals a present thread, which paints + presents under the same `paint_mode_mutex_`
+protocol (frames signalled while painting collapse to the latest). Stopped before the Vulkan presenter is torn down.
+
+| run (1080p session, no client, vsync on, `NHL_DIRECT_PRESENT=1`, readback fast) | guest p5 / median | presented p5 / median / min | gaps > 50 ms per min |
+|---|---|---|---|
+| pres5 (present on guest output thread), int0 | 30.3 / 45.8 | 30.1 / 46.2 / 29.9 | 1 |
+| **pt-int0** present thread, int0 | 35.7 / 54.4 | **37.0 / 54.7 / 33.9** | 0 |
+| pt-int2 present thread, `NHL_SWAP_INTERVAL=2` (30 lock) | 28.5 / 29.9 | 28.2 / 29.9 / 27.2 | 9 |
+
+Launcher default: present thread on, interval 0. 30 lock available via Steam launch options.
+Erik's play feedback (rtv + direct present, before the present thread): "absolutely playable", hitches on fast
+camera pans; slight green at the very start of the intro movie; broken (blocky) transition wipes — same on the
+Windows build; Steam overlay stutters; UI scroll sound glitches (also in the original).

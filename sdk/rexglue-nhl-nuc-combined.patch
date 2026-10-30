@@ -893,6 +893,37 @@ index 1cb3faa..5527d5d 100644
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..873b25b 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -326,6 +326,9 @@ class Presenter {
+   Presenter(const Presenter& presenter) = delete;
+   Presenter& operator=(const Presenter& presenter) = delete;
+   virtual ~Presenter();
++  // Stops the NHL present thread; derived presenters call it before destroying their
++  // painting resources. Idempotent.
++  void StopPresentThread();
+ 
+   virtual Surface::TypeFlags GetSupportedSurfaceTypes() const = 0;
+ 
+@@ -891,6 +894,16 @@ class Presenter {
+   // On the other hand, the guest output thread _must_ hold it all the time it's
+   // painting, to ensure the mode stays the same while it's painting.
+   std::mutex paint_mode_mutex_;
++  // NHL: REX_PRESENT_THREAD=1 - in kGuestOutputThreadImmediately mode, the guest output
++  // thread only signals this thread, which paints and presents (keeps the host present and
++  // its GPU waits off the GPU command processor thread).
++  void PresentThreadMain();
++  void SignalPresentThread();
++  std::thread present_thread_;
++  std::mutex present_thread_mutex_;
++  std::condition_variable present_thread_cv_;
++  bool present_thread_pending_ = false;
++  bool present_thread_shutdown_ = false;
+   // UI thread: writable, guest output thread: read-only.
+   PaintMode paint_mode_ = PaintMode::kNone;
+ 
 diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
 index aa55a4a..c668db2 100644
 --- a/include/rex/ui/vulkan/functions/device_1_0.inc
@@ -4171,10 +4202,119 @@ index fc46d86..b5bfeb4 100644
 +    target_compile_definitions(rexruntime PUBLIC REX_HAS_FIDELITYFX_SDK=1)
 +endif()
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..465ae00 100644
+index 7360ed9..f572579 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
-@@ -1300,6 +1300,10 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <atomic>
+ #include <cctype>
+ #include <utility>
+@@ -287,6 +288,8 @@ Presenter::~Presenter() {
+   // it if needed.
+   assert_false(is_executing_ui_drawers_);
+ 
++  StopPresentThread();
++
+ #if REX_PLATFORM_WIN32
+   if (dxgi_ui_tick_thread_.joinable()) {
+     {
+@@ -614,6 +617,10 @@ bool Presenter::RefreshGuestOutput(
+   }
+ 
+   // Trigger the presentation on the host.
++  static const bool present_thread_enabled = [] {
++    const char* e = std::getenv("REX_PRESENT_THREAD");
++    return e && *e && *e != '0';
++  }();
+   PaintResult paint_result = PaintResult::kNotPresented;
+   {
+     std::lock_guard<std::mutex> paint_mode_mutex_lock(paint_mode_mutex_);
+@@ -627,7 +634,11 @@ bool Presenter::RefreshGuestOutput(
+         break;
+       case PaintMode::kGuestOutputThreadImmediately:
+         // Both painting and window paint requesting are accessible.
+-        if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
++        if (present_thread_enabled) {
++          // NHL: hand the paint to the present thread (see PresentThreadMain).
++          SignalPresentThread();
++        } else if (surface_paint_connection_state_ ==
++                   SurfacePaintConnectionState::kConnectedPaintable) {
+           paint_result = PaintAndPresent(false);
+           if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
+             RequestPaintOrConnectionRecoveryViaWindow(true);
+@@ -649,6 +660,67 @@ bool Presenter::RefreshGuestOutput(
+   return is_active;
+ }
+ 
++void Presenter::SignalPresentThread() {
++  {
++    std::lock_guard<std::mutex> lock(present_thread_mutex_);
++    if (present_thread_shutdown_) {
++      return;
++    }
++    if (!present_thread_.joinable()) {
++      present_thread_ = std::thread([this] { PresentThreadMain(); });
++    }
++    present_thread_pending_ = true;
++  }
++  present_thread_cv_.notify_one();
++}
++
++void Presenter::StopPresentThread() {
++  {
++    std::lock_guard<std::mutex> lock(present_thread_mutex_);
++    present_thread_shutdown_ = true;
++  }
++  present_thread_cv_.notify_one();
++  if (present_thread_.joinable()) {
++    present_thread_.join();
++  }
++}
++
++void Presenter::PresentThreadMain() {
++  for (;;) {
++    {
++      std::unique_lock<std::mutex> lock(present_thread_mutex_);
++      present_thread_cv_.wait(lock, [this] { return present_thread_pending_ || present_thread_shutdown_; });
++      if (present_thread_shutdown_) {
++        return;
++      }
++      // Frames signalled while painting collapse into one paint of the latest image.
++      present_thread_pending_ = false;
++    }
++    PaintResult paint_result = PaintResult::kNotPresented;
++    {
++      // Same protocol as the guest output thread painting immediately: the UI thread
++      // changes the mode and the connection only under this mutex.
++      std::lock_guard<std::mutex> paint_mode_mutex_lock(paint_mode_mutex_);
++      if (paint_mode_ == PaintMode::kGuestOutputThreadImmediately &&
++          surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
++        paint_result = PaintAndPresent(false);
++        if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
++          RequestPaintOrConnectionRecoveryViaWindow(true);
++        }
++      } else if (paint_mode_ == PaintMode::kUIThreadOnRequest) {
++        RequestPaintOrConnectionRecoveryViaWindow(true);
++      }
++    }
++    if (host_gpu_loss_callback_) {
++      if (paint_result == PaintResult::kGpuLostResponsible) {
++        host_gpu_loss_callback_(true, false);
++      } else if (paint_result == PaintResult::kGpuLostExternally) {
++        host_gpu_loss_callback_(false, false);
++      }
++    }
++  }
++}
++
+ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConfig& new_config) {
+   // For simplicity, this may be called externally repeatedly.
+   // Lock the mutex only when something has been modified, and also don't
+@@ -1300,6 +1372,10 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
      std::lock_guard<std::mutex> lock(paint_mode_mutex_);
      paint_mode_ = new_mode;
    }
@@ -4186,7 +4326,7 @@ index 7360ed9..465ae00 100644
  }
  
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..bf9266e 100644
+index 23645ef..de5ae65 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
 @@ -11,6 +11,7 @@
@@ -4197,7 +4337,16 @@ index 23645ef..bf9266e 100644
  #include <cstddef>
  #include <cstdint>
  #include <cmath>
-@@ -2240,7 +2241,28 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -190,6 +191,8 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
+ }
+ 
+ VulkanPresenter::~VulkanPresenter() {
++  // The NHL present thread paints through this object - stop it first.
++  StopPresentThread();
+   // Destroy the swapchain after its images are not used for drawing anymore.
+   // This is a confusing part in Vulkan, as vkQueuePresentKHR doesn't signal a
+   // fence clearly indicating when it's safe to destroy a swapchain, so we
+@@ -2240,7 +2243,28 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    {
      const VulkanDevice::Queue::Acquisition queue_acquisition =
          vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);

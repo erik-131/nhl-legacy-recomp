@@ -11,6 +11,10 @@ export NHL_NO_GUIDE="${NHL_NO_GUIDE:-1}"  # Guide button opens the Steam menu, n
 # Present every guest frame from the guest output thread (no ImGui overlay/toasts registered);
 # otherwise UI-thread painting shows only ~half of the frames.
 export NHL_DIRECT_PRESENT="${NHL_DIRECT_PRESENT:-1}"
+# ...and do the host present on a dedicated thread, off the GPU command processor thread
+# (visible fps median 46 -> 55 on the NUC).
+export REX_PRESENT_THREAD="${REX_PRESENT_THREAD:-1}"
+# Steady 30 fps instead: Steam launch options "NHL_SWAP_INTERVAL=2 %command%".
 # Movies: the VP6 bridge decodes with ffmpeg, which the GoW Steam image lacks (green movies).
 # A static ffmpeg is installed next to the binary (not in git).
 [ -x ./ffmpeg ] && export NHL_VP6_FFMPEG="${NHL_VP6_FFMPEG:-$PWD/ffmpeg}"
