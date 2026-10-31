@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start/stop the Wolf Steam session headless (no Moonlight client) via the Wolf API lobby endpoint —
 # the same call Wolf UI makes for "User -> Steam -> Start". Usage: wolf_session.sh start|stop|status
-# WOLF_RES=3840x2160 for a 4K session (default 1920x1080). Needs sudo (the API socket lives inside the wolf container, reached via /proc/<pid>/root).
+# WOLF_NOSTEAM=1 starts sway without Steam (benchmarks). WOLF_RES=3840x2160 for a 4K session (default 1920x1080). Needs sudo (the API socket lives inside the wolf container, reached via /proc/<pid>/root).
 set -euo pipefail
 WPID=$(pgrep -x wolf | head -1) || { echo "wolf not running"; exit 1; }
 S=/proc/$WPID/root/run/user/wolf/wolf.sock
@@ -18,6 +18,8 @@ import json,sys,os
 W,H=map(int,os.environ.get("WOLF_RES","1920x1080").split("x"))
 p=[p for p in json.load(sys.stdin)["profiles"] if p["id"]=="user"][0]
 a=[a for a in p["apps"] if a["title"]=="Steam"][0]
+if os.environ.get("WOLF_NOSTEAM"):  # benchmark lobby: sway only, no Steam (saves CPU/GPU/power)
+    a["runner"]["mounts"]=a["runner"]["mounts"]+["/etc/wolf/profile-data/user/WolfSteam/nhl-linux-dev/gow-startup-idle.sh:/opt/gow/startup-app.sh:ro"]
 print(json.dumps({"profile_id":"user","name":"Steam","icon_png_path":a.get("icon_png_path"),"multi_user":False,
  "pin":None,"stop_when_everyone_leaves":False,
  "video_settings":{"width":W,"height":H,"refresh_rate":60,"wayland_render_node":"/dev/dri/renderD128",
@@ -25,7 +27,7 @@ print(json.dumps({"profile_id":"user","name":"Steam","icon_png_path":a.get("icon
  "audio_settings":{"channel_count":2},"client_settings":None,
  "runner_state_folder":"/etc/wolf/profile-data/user/WolfSteam","runner":a["runner"]}))' |
     api -X POST -H 'Content-Type: application/json' --data @- http://localhost/api/v1/lobbies/create; echo
-  for _ in $(seq 60); do C=$(steam_c); [ -n "$C" ] && docker exec "$C" pgrep -f ubuntu12_32/steam >/dev/null && break; sleep 3; done
+  for _ in $(seq 60); do C=$(steam_c); [ -n "$C" ] && docker exec "$C" pgrep -f "ubuntu12_32/steam|sleep infinity" >/dev/null && break; sleep 3; done
   echo "container: $(steam_c)";;
 stop)
   for id in $(api http://localhost/api/v1/lobbies | python3 -c 'import json,sys; [print(l["id"]) for l in json.load(sys.stdin)["lobbies"]]'); do
