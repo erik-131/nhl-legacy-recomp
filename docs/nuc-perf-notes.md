@@ -322,3 +322,17 @@ Playable build tagged `playable-2026-10-31`, backup `/home/claude/nhl-backup/sta
   release builds compile out the "going to hang" assert); NHL's D3D wakes its per-core workers via a DPC that calls
   KeSetEvent. Fix: run queued DPCs on the kernel dispatch thread (`[nhl-dpc]` logs). 10/10 boots OK with the fix, but no
   DPC was queued in those boots or in a full run, so the cause is not yet confirmed.
+- **Render pass breaks by source** (`[nhl-rpends]`/`[nhl-barriers]`, Steam-free lobby): per frame fb_switch ~16, resolve 13,
+  upload ~23, draw ~12, tex ~8, rt 6, prep ~6; barriers pushed mostly by resolve (51 buffer + 18 image), rt (42 image),
+  tex (~39 b + 27 i) and upload (~62 b).
+- **`gpu_stream_skip_unchanged`** (adapted from the Simpsons recomp, default off): ~60 % of upload requests fully skipped;
+  render passes 84 → 67, barriers 169 → 126, upload breaks 22.7 → 12 per frame. fps A/B not done — see thermals.
+- **Thermals / host**: the idle Steam Big Picture UI in the bench lobby held the iGPU at ~600 MHz and heated the CPU during
+  all earlier benches → new `WOLF_NOSTEAM=1` lobby (sway only). Even with the CT idle, the CPU package sat at 77–101 °C
+  and the GPU fell to 800–1300 MHz under load later in the night (host load or cooling, outside the CT); GPU
+  `slpc_power_profile` = power_saving. fps numbers after ~03:00 are not comparable; nothing was promoted.
+- **Boot stall**: DPC theory disproved (no DPC is ever queued; stalls continue 2/10, 1/12 with the DPC fix). Main
+  XThread sleeps forever by design (sub_828B2550 → Sleep(INFINITE)); the stall is a lost wakeup between the end of boot
+  loading (gps.big) and the EA logo movie, object unknown. gdb can't unwind recompiled code. An on-demand guest
+  thread dump (wait handles + r1 back-chain) broke the build (XThread layout change → guest access violations) and was
+  reverted.
