@@ -336,3 +336,9 @@ Playable build tagged `playable-2026-10-31`, backup `/home/claude/nhl-backup/sta
   loading (gps.big) and the EA logo movie, object unknown. gdb can't unwind recompiled code. An on-demand guest
   thread dump (wait handles + r1 back-chain) broke the build (XThread layout change → guest access violations) and was
   reverted.
+- **GPU frequency policy (morning)**: `slpc_power_profile` is `[base]` (earlier note misread it), but `rps_RP1_freq_mhz=800`
+  (efficient frequency) with `slpc_ignore_eff_freq=0`: SLPC drops the GPU to ~800–900 MHz when it isn't fully busy.
+  Both runs with `gpu_stream_skip_unchanged` (fewer barrier stalls) ran at 812/889 MHz vs 1300–1650 MHz for the
+  neighbouring A runs → efficiency gains get eaten by downclocking. Host-side fix (not writable from the CT):
+  `echo 1 > /sys/class/drm/card0/gt/gt0/slpc_ignore_eff_freq` (resets on reboot). Re-run the skip-unchanged A/B after that.
+- Skip-unchanged A/B: A 64.6/67.3 median (GPU 1645/1569 MHz), B1 48.3 at 889 MHz, B2 boot stall → invalid, not promoted.

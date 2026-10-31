@@ -25,3 +25,4 @@ Status: **open**, **fixed** (verified in play or screenshots), **fixed?** (chang
 
 Environment notes: Frigate on the host and any active Moonlight session share the iGPU — stop them for clean
 measurements. `/dev/shm` guest-memory leak fixed (was 15 GB).
+| 19 | NUC runs hot / GPU downclocks | **open (host)** | CPU package 77–101 °C with the CT idle during the night (host load); SLPC drops the GPU to its 800 MHz efficient frequency when not fully busy - `slpc_ignore_eff_freq=1` on the host. |
