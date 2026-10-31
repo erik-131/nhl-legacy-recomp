@@ -339,6 +339,9 @@ Playable build tagged `playable-2026-10-31`, backup `/home/claude/nhl-backup/sta
 - **GPU frequency policy (morning)**: `slpc_power_profile` is `[base]` (earlier note misread it), but `rps_RP1_freq_mhz=800`
   (efficient frequency) with `slpc_ignore_eff_freq=0`: SLPC drops the GPU to ~800–900 MHz when it isn't fully busy.
   Both runs with `gpu_stream_skip_unchanged` (fewer barrier stalls) ran at 812/889 MHz vs 1300–1650 MHz for the
-  neighbouring A runs → efficiency gains get eaten by downclocking. Host-side fix (not writable from the CT):
-  `echo 1 > /sys/class/drm/card0/gt/gt0/slpc_ignore_eff_freq` (resets on reboot). Re-run the skip-unchanged A/B after that.
+  neighbouring A runs → efficiency gains get eaten by downclocking (the night backup job on the host also ran then).
+  CORRECTION: `slpc_ignore_eff_freq=1` lets SLPC go *below* RPe (more power saving) and does nothing here (RPe = RPn =
+  800 MHz) - do not use it. The floor to raise is the minimum frequency, on the host:
+  `echo 1400 > /sys/class/drm/card0/gt/gt0/rps_min_freq_mhz` (resets on reboot; 800 restores). Re-run the A/B after that.
+- The night's heat (CPU 77–101 °C with the CT idle) was a scheduled backup job on the host.
 - Skip-unchanged A/B: A 64.6/67.3 median (GPU 1645/1569 MHz), B1 48.3 at 889 MHz, B2 boot stall → invalid, not promoted.
