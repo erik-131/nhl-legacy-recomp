@@ -1,0 +1,137 @@
+From a357e834f903d47f4f1215c33821a860a355ea2f Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 01:58:58 +0100
+Subject: [PATCH] NHL diag: per shader-pair GPU time ([nhl-gpushader],
+ REX_GPU_PROF_SHADERS)
+
+---
+ .../rex/graphics/vulkan/command_processor.h   |  7 ++++
+ src/graphics/vulkan/command_processor.cpp     | 36 +++++++++++++++++--
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 4471b4c..03bfcd3 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -449,6 +449,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+     VkQueryPool pool;
+     uint32_t count;
+     std::vector<uint8_t> cats;
++    std::vector<uint64_t> tags;
+   };
+   std::vector<VkQueryPool> nhl_gpu_pools_free_;
+   std::deque<NhlGpuProfPending> nhl_gpu_pending_;
+@@ -456,6 +457,12 @@ class VulkanCommandProcessor : public CommandProcessor {
+   uint32_t nhl_gpu_count_ = 0;
+   uint32_t nhl_gpu_cur_cat_ = UINT32_MAX;
+   std::vector<uint8_t> nhl_gpu_cats_;
++  // REX_GPU_PROF_SHADERS: per-draw-segment shader pair (VS hash ^ PS hash rotated) and the
++  // GPU ticks accumulated per pair, logged as [nhl-gpushader].
++  std::vector<uint64_t> nhl_gpu_tags_;
++  uint64_t nhl_gpu_cur_tag_ = 0;
++  uint64_t nhl_gpu_draw_tag_ = 0;
++  std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> nhl_gpu_tag_ticks_;  // ticks, segs
+   double nhl_gpu_ns_per_tick_ = 0.0;
+   uint64_t nhl_gpu_cat_ticks_[kNhlGpuCatCount] = {};
+   uint64_t nhl_gpu_cat_marks_[kNhlGpuCatCount] = {};
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index d905774..86ef64a 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <bit>
+ #include <array>
+ #include <cmath>
+ #include <cstdint>
+@@ -4441,6 +4442,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+     ++run;
+   }
++  // VS/PS pair for [nhl-gpushader]; the PS hash is rotated so a pair's tag stays unique.
++  nhl_gpu_draw_tag_ = vertex_shader->ucode_data_hash() ^
++                      (pixel_shader ? std::rotl(pixel_shader->ucode_data_hash(), 17) : 0) ^ 1;
+   NhlGpuMark(kNhlGpuDraw);
+   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+       render_target_cache_->last_update_render_pass(),
+@@ -5695,7 +5699,9 @@ uint64_t NhlGpuNowNs() {
+ 
+ void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
+   if (!NhlGpuProfEnabled() || !submission_open_ || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
+-  if (cat == nhl_gpu_cur_cat_) return;
++  static const bool by_shader = std::getenv("REX_GPU_PROF_SHADERS") != nullptr;
++  const uint64_t tag = (by_shader && cat == kNhlGpuDraw) ? nhl_gpu_draw_tag_ : 0;
++  if (cat == nhl_gpu_cur_cat_ && tag == nhl_gpu_cur_tag_) return;
+   if (nhl_gpu_count_ >= kNhlGpuQueries - 1) {
+     ++nhl_gpu_overflow_;
+     return;
+@@ -5703,7 +5709,9 @@ void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
+   deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                                nhl_gpu_pool_, nhl_gpu_count_++);
+   nhl_gpu_cats_.push_back(uint8_t(cat));
++  nhl_gpu_tags_.push_back(tag);
+   nhl_gpu_cur_cat_ = cat;
++  nhl_gpu_cur_tag_ = tag;
+   ++nhl_gpu_cat_marks_[cat];
+ }
+ 
+@@ -5735,7 +5743,9 @@ void VulkanCommandProcessor::NhlGpuProfOnBeginSubmission() {
+   nhl_gpu_pools_free_.pop_back();
+   nhl_gpu_count_ = 0;
+   nhl_gpu_cats_.clear();
++  nhl_gpu_tags_.clear();
+   nhl_gpu_cur_cat_ = UINT32_MAX;
++  nhl_gpu_cur_tag_ = 0;
+   NhlGpuMark(kNhlGpuOther);
+ }
+ 
+@@ -5759,6 +5769,8 @@ void VulkanCommandProcessor::NhlGpuProfOnSubmitted(uint64_t submission) {
+   p.pool = nhl_gpu_pool_;
+   p.count = nhl_gpu_count_;
+   p.cats = std::move(nhl_gpu_cats_);
++  p.tags = std::move(nhl_gpu_tags_);
++  nhl_gpu_tags_.clear();
+   nhl_gpu_pending_.push_back(std::move(p));
+   nhl_gpu_pool_ = VK_NULL_HANDLE;
+   nhl_gpu_cats_.clear();
+@@ -5778,7 +5790,14 @@ void VulkanCommandProcessor::NhlGpuProfPoll() {
+                                   VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+       for (uint32_t i = 0; i + 1 < p.count; ++i) {
+         const uint8_t cat = i < p.cats.size() ? p.cats[i] : uint8_t(kNhlGpuOther);
+-        if (ts[i + 1] > ts[i]) nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
++        if (ts[i + 1] > ts[i]) {
++          nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
++          if (i < p.tags.size() && p.tags[i]) {
++            auto& e = nhl_gpu_tag_ticks_[p.tags[i]];
++            e.first += ts[i + 1] - ts[i];
++            ++e.second;
++          }
++        }
+       }
+       if (ts[p.count - 1] > ts[0]) nhl_gpu_busy_ticks_ += ts[p.count - 1] - ts[0];
+       if (nhl_gpu_last_end_tick_ && ts[0] > nhl_gpu_last_end_tick_) {
+@@ -5808,6 +5827,19 @@ void VulkanCommandProcessor::NhlGpuProfPoll() {
+                 "overflow={}{}",
+                 w, nhl_gpu_busy_ticks_ * k, nhl_gpu_idle_ticks_ * k, nhl_gpu_submissions_,
+                 nhl_gpu_overflow_, out);
++    if (!nhl_gpu_tag_ticks_.empty()) {
++      std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v(nhl_gpu_tag_ticks_.begin(),
++                                                                      nhl_gpu_tag_ticks_.end());
++      std::sort(v.begin(), v.end(),
++                [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
++      std::string top;
++      for (size_t i = 0; i < v.size() && i < 12; ++i) {
++        top += fmt::format(" {:016X}:{:.2f}ms/{}", v[i].first, v[i].second.first * k,
++                           v[i].second.second);
++      }
++      REXGPU_INFO("[nhl-gpushader] pairs={}{}", v.size(), top);
++      nhl_gpu_tag_ticks_.clear();
++    }
+     std::memset(nhl_gpu_cat_ticks_, 0, sizeof(nhl_gpu_cat_ticks_));
+     std::memset(nhl_gpu_cat_marks_, 0, sizeof(nhl_gpu_cat_marks_));
+     nhl_gpu_busy_ticks_ = nhl_gpu_idle_ticks_ = nhl_gpu_submissions_ = nhl_gpu_overflow_ = 0;
+-- 
+2.47.3
+

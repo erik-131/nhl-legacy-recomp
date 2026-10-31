@@ -1,0 +1,30 @@
+From 4c490fc27f60d8d1ff5352f55804cb9f98fc2453 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 02:16:38 +0100
+Subject: [PATCH] NHL diag: log queued DPCs
+
+---
+ src/kernel/xboxkrnl/xboxkrnl_threading.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index c07783d..fb1023e 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -1197,6 +1197,13 @@ u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
+   dpc->arg2 = (uint32_t)arg2;
+ 
+   dpc_list->Insert(list_entry_ptr);
++  {
++    static std::atomic<uint64_t> queued{0};
++    const uint64_t n = ++queued;
++    if (n <= 5 || (n & (n - 1)) == 0) {
++      REXKRNL_INFO("[nhl-dpc] queued #{} routine={:08X}", n, uint32_t(dpc->routine));
++    }
++  }
+ 
+   const uint32_t dpc_ptr = dpc.guest_address();
+   REX_KERNEL_STATE()->QueueDispatch([dpc_ptr, list_entry_ptr]() {
+-- 
+2.47.3
+

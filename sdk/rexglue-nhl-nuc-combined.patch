@@ -537,7 +537,7 @@ index e5e4908..a72b6e9 100644
     public:
      void Export(ucode::ExportRegister export_register, const float* value,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..4471b4c 100644
+index 696ff48..03bfcd3 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -10,6 +10,7 @@
@@ -575,7 +575,7 @@ index 696ff48..4471b4c 100644
    VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
        SingleTransientDescriptorLayout transient_descriptor_layout) const {
      return descriptor_set_layouts_single_transient_[size_t(transient_descriptor_layout)];
-@@ -407,6 +421,50 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -407,6 +421,57 @@ class VulkanCommandProcessor : public CommandProcessor {
    // the submission to await to simply check status, or pass
    // GetCurrentSubmission() to wait for all queue operations to be completed.
    void CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission);
@@ -607,6 +607,7 @@ index 696ff48..4471b4c 100644
 +    VkQueryPool pool;
 +    uint32_t count;
 +    std::vector<uint8_t> cats;
++    std::vector<uint64_t> tags;
 +  };
 +  std::vector<VkQueryPool> nhl_gpu_pools_free_;
 +  std::deque<NhlGpuProfPending> nhl_gpu_pending_;
@@ -614,6 +615,12 @@ index 696ff48..4471b4c 100644
 +  uint32_t nhl_gpu_count_ = 0;
 +  uint32_t nhl_gpu_cur_cat_ = UINT32_MAX;
 +  std::vector<uint8_t> nhl_gpu_cats_;
++  // REX_GPU_PROF_SHADERS: per-draw-segment shader pair (VS hash ^ PS hash rotated) and the
++  // GPU ticks accumulated per pair, logged as [nhl-gpushader].
++  std::vector<uint64_t> nhl_gpu_tags_;
++  uint64_t nhl_gpu_cur_tag_ = 0;
++  uint64_t nhl_gpu_draw_tag_ = 0;
++  std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> nhl_gpu_tag_ticks_;  // ticks, segs
 +  double nhl_gpu_ns_per_tick_ = 0.0;
 +  uint64_t nhl_gpu_cat_ticks_[kNhlGpuCatCount] = {};
 +  uint64_t nhl_gpu_cat_marks_[kNhlGpuCatCount] = {};
@@ -626,7 +633,7 @@ index 696ff48..4471b4c 100644
    // If is_guest_command is true, a new full frame - with full cleanup of
    // resources and, if needed, starting capturing - is opened if pending (as
    // opposed to simply resuming after mid-frame synchronization). Returns
-@@ -416,6 +474,34 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -416,6 +481,34 @@ class VulkanCommandProcessor : public CommandProcessor {
    // clearing and stopping capturing. Returns whether the submission was done
    // successfully, if it has failed, leaves it open.
    bool EndSubmission(bool is_swap);
@@ -661,7 +668,7 @@ index 696ff48..4471b4c 100644
    bool AwaitAllQueueOperationsCompletion() {
      CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
      return !submission_open_ && submissions_in_flight_fences_.empty();
-@@ -815,6 +901,15 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -815,6 +908,15 @@ class VulkanCommandProcessor : public CommandProcessor {
    // Whether descriptor sets in current_graphics_descriptor_sets_ point to
    // up-to-date data.
    uint32_t current_graphics_descriptor_set_values_up_to_date_;
@@ -678,10 +685,36 @@ index 696ff48..4471b4c 100644
    // low bits for the descriptor set layouts that remained the same are kept
    // when changing the pipeline layout. May be out of sync with
 diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
-index 9d2a848..4df6390 100644
+index 9d2a848..ac06295 100644
 --- a/include/rex/graphics/vulkan/deferred_command_buffer.h
 +++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
-@@ -175,12 +175,48 @@ class DeferredCommandBuffer {
+@@ -10,6 +10,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
+@@ -25,6 +26,9 @@ class VulkanCommandProcessor;
+ 
+ class DeferredCommandBuffer {
+  public:
++  // NHL diag [nhl-cmdstats]: render pass/rendering begins, pipeline binds, pipeline barriers
++  // recorded (cumulative; the command processor logs per-second deltas).
++  static inline std::atomic<uint64_t> nhl_stats_[3] = {};
+   DeferredCommandBuffer(const VulkanCommandProcessor& command_processor,
+                         size_t initial_size_bytes = 1024 * 1024);
+ 
+@@ -95,6 +99,7 @@ class DeferredCommandBuffer {
+   }
+ 
+   void CmdVkBindPipeline(VkPipelineBindPoint pipeline_bind_point, VkPipeline pipeline) {
++    ++nhl_stats_[1];
+     auto& args = *reinterpret_cast<ArgsVkBindPipeline*>(
+         WriteCommand(Command::kVkBindPipeline, sizeof(ArgsVkBindPipeline)));
+     args.pipeline_bind_point = pipeline_bind_point;
+@@ -175,12 +180,48 @@ class DeferredCommandBuffer {
      args.region_count = region_count;
      return reinterpret_cast<VkBufferCopy*>(args_ptr + header_size);
    }
@@ -730,7 +763,7 @@ index 9d2a848..4df6390 100644
    void CmdVkBeginQuery(VkQueryPool query_pool, uint32_t query, VkQueryControlFlags flags) {
      auto& args = *reinterpret_cast<ArgsVkBeginQuery*>(
          WriteCommand(Command::kVkBeginQuery, sizeof(ArgsVkBeginQuery)));
-@@ -265,6 +301,14 @@ class DeferredCommandBuffer {
+@@ -265,6 +306,14 @@ class DeferredCommandBuffer {
    void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
    void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
  
@@ -745,7 +778,7 @@ index 9d2a848..4df6390 100644
    void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
      auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
          WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
-@@ -359,9 +403,11 @@ class DeferredCommandBuffer {
+@@ -359,9 +408,11 @@ class DeferredCommandBuffer {
      kVkBindIndexBuffer,
      kVkBindPipeline,
      kVkBindVertexBuffers,
@@ -757,7 +790,7 @@ index 9d2a848..4df6390 100644
      kVkCopyBufferToImage,
      kVkCopyQueryPoolResults,
      kVkDispatch,
-@@ -381,6 +427,13 @@ class DeferredCommandBuffer {
+@@ -381,6 +432,13 @@ class DeferredCommandBuffer {
      kVkSetStencilReference,
      kVkSetStencilWriteMask,
      kVkSetViewport,
@@ -771,7 +804,7 @@ index 9d2a848..4df6390 100644
    };
  
    struct CommandHeader {
-@@ -467,6 +520,13 @@ class DeferredCommandBuffer {
+@@ -467,6 +525,13 @@ class DeferredCommandBuffer {
      static_assert(alignof(VkImageSubresourceRange) <= alignof(uintmax_t));
    };
  
@@ -785,7 +818,7 @@ index 9d2a848..4df6390 100644
    struct ArgsVkCopyBuffer {
      VkBuffer src_buffer;
      VkBuffer dst_buffer;
-@@ -475,6 +535,17 @@ class DeferredCommandBuffer {
+@@ -475,6 +540,17 @@ class DeferredCommandBuffer {
      static_assert(alignof(VkBufferCopy) <= alignof(uintmax_t));
    };
  
@@ -833,7 +866,7 @@ index 7b938b9..6b50a62 100644
    std::deque<std::pair<uint64_t, VkPipeline>> deferred_destroy_pipelines_;
    std::mutex deferred_destroy_lock_;
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
-index 34f7033..38ff795 100644
+index 34f7033..d2bebb7 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
 +++ b/include/rex/graphics/vulkan/render_target_cache.h
 @@ -19,6 +19,7 @@
@@ -872,7 +905,18 @@ index 34f7033..38ff795 100644
    VkRenderPass last_update_render_pass() const { return last_update_render_pass_; }
    const Framebuffer* last_update_framebuffer() const { return last_update_framebuffer_; }
    void GetLastUpdateRenderingAttachments(VkRenderingAttachmentInfo* color_attachments,
-@@ -800,6 +822,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -142,6 +164,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   }
+ 
+   bool msaa_2x_attachments_supported() const { return msaa_2x_attachments_supported_; }
++  // NHL performance mode (nhl_force_host_msaa_1x): host render targets get 1 sample even when
++  // the guest renders 2x/4x MSAA. EDRAM tile math still uses the guest sample count; only host
++  // images, render passes, pipelines and the shaders that fetch from host images change.
++  bool host_msaa_1x() const { return host_msaa_1x_; }
+   bool msaa_2x_no_attachments_supported() const { return msaa_2x_no_attachments_supported_; }
+   bool IsMsaa2xSupported(bool subpass_has_attachments) const {
+     return subpass_has_attachments ? msaa_2x_attachments_supported_
+@@ -800,6 +826,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
        const uint64_t* render_target_resolve_clear_values = nullptr,
        const Transfer::Rectangle* resolve_clear_rectangle = nullptr);
  
@@ -887,7 +931,15 @@ index 34f7033..38ff795 100644
    VkPipeline GetDumpPipeline(DumpPipelineKey key);
    VkPipeline GetDirectResolvePipeline(DirectResolvePipelineKey key);
    bool TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
-@@ -876,6 +906,28 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+@@ -818,6 +852,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   bool depth_float24_convert_in_pixel_shader_ = false;
+ 
+   bool msaa_2x_attachments_supported_ = false;
++  bool host_msaa_1x_ = false;
+   bool msaa_2x_no_attachments_supported_ = false;
+   bool color_16bit_transfer_uint_formats_supported_ = true;
+   bool color_32bit_transfer_uint_formats_supported_ = true;
+@@ -876,6 +911,28 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
    VkRenderPass fsi_render_pass_ = VK_NULL_HANDLE;
    Framebuffer fsi_framebuffer_;
  
@@ -982,6 +1034,19 @@ index 1cb3faa..5527d5d 100644
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
+index 9b9cf9e..be820b5 100644
+--- a/include/rex/system/kernel_state.h
++++ b/include/rex/system/kernel_state.h
+@@ -303,6 +303,8 @@ class KernelState {
+   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
+                                      uint32_t extended_error, uint32_t length);
+ 
++  // Runs fn on the "Kernel Dispatch" host thread (a guest-capable XHostThread), in order.
++  void QueueDispatch(std::function<void()> fn);
+   void CompleteOverlappedDeferred(std::function<void()> completion_callback,
+                                   uint32_t overlapped_ptr, X_RESULT result,
+                                   std::function<void()> pre_callback = nullptr,
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
 index afb4a30..873b25b 100644
 --- a/include/rex/ui/presenter.h
@@ -1075,6 +1140,34 @@ index b52bf39..5240a54 100644
    return static_cast<FileMappingHandle>(ret);
  #endif
  }
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..a6915a4 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -6,6 +6,7 @@
+  * @license     BSD 3-Clause License
+  */
+ 
++#include <cstdlib>
+ #include <rex/platform.h>
+ #include <rex/thread.h>
+ 
+@@ -1070,7 +1071,14 @@ bool DispatchCurrentThreadUserCallback() {
+ 
+ namespace {
+ 
+-constexpr auto kAlertablePollSlice = std::chrono::milliseconds(1);
++// NHL: REX_ALERTABLE_POLL_MS (default 1). Alertable waits wake every slice to look for queued
++// APCs (the delivery signal does not interrupt a condition-variable wait); with many guest
++// threads in alertable waits that polling costs real CPU - and on an iGPU, package power.
++const std::chrono::milliseconds kAlertablePollSlice = [] {
++  const char* e = std::getenv("REX_ALERTABLE_POLL_MS");
++  const long v = (e && *e) ? std::strtol(e, nullptr, 10) : 1;
++  return std::chrono::milliseconds(v < 1 ? 1 : (v > 50 ? 50 : v));
++}();
+ 
+ class ScopedAlertableState {
+  public:
 diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
 index 0d8f8af..6dc19af 100644
 --- a/src/graphics/CMakeLists.txt
@@ -2294,12 +2387,14 @@ index 3027dc8..887e58b 100644
    SCOPE_profile_cpu_f("gpu");
  
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..d905774 100644
+index 001f36b..241b588 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -11,13 +11,19 @@
+@@ -10,14 +10,21 @@
+  */
  
  #include <algorithm>
++#include <bit>
  #include <array>
 +#include <cmath>
  #include <cstdint>
@@ -2317,7 +2412,7 @@ index 001f36b..d905774 100644
  #include <utility>
  #include <vector>
  
-@@ -71,6 +77,8 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+@@ -71,6 +78,8 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
  
  namespace rex::graphics::vulkan {
  
@@ -2326,7 +2421,7 @@ index 001f36b..d905774 100644
  namespace {
  
  // glslang default built-in resource limits.
-@@ -1898,6 +1906,8 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1898,6 +1907,8 @@ bool VulkanCommandProcessor::SetupContext() {
  
  void VulkanCommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
@@ -2335,7 +2430,7 @@ index 001f36b..d905774 100644
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
  
-@@ -2269,6 +2279,52 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2269,6 +2280,52 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
    gamma_ramp_pwl_current_frame_ = UINT32_MAX;
  }
  
@@ -2388,16 +2483,33 @@ index 001f36b..d905774 100644
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
-@@ -2288,6 +2344,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2288,6 +2345,25 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
      REXGPU_ERROR("XELOG_GPU PRESENT: BeginSubmission FAILED");
      return;
    }
 +  NhlGpuMark(kNhlGpuSwap);
 +  NhlResLogOnSwap();
++  // [nhl-cmdstats] once per second: per-frame render pass begins, pipeline binds, barriers.
++  if (static const bool cmdstats = std::getenv("REX_CMD_STATS") != nullptr; cmdstats) {
++    static uint64_t frames = 0, last[3] = {};
++    static auto t0 = std::chrono::steady_clock::now();
++    ++frames;
++    const auto now = std::chrono::steady_clock::now();
++    if (now - t0 >= std::chrono::seconds(1)) {
++      uint64_t cur[3];
++      for (int i = 0; i < 3; ++i) cur[i] = DeferredCommandBuffer::nhl_stats_[i].load();
++      REXGPU_INFO("[nhl-cmdstats] per frame: render_passes={:.1f} pipeline_binds={:.1f} barriers={:.1f}",
++                  double(cur[0] - last[0]) / frames, double(cur[1] - last[1]) / frames,
++                  double(cur[2] - last[2]) / frames);
++      std::memcpy(last, cur, sizeof(last));
++      frames = 0;
++      t0 = now;
++    }
++  }
  
    bool skip_present_due_async_placeholder = REXCVAR_GET(async_shader_compilation) &&
                                              REXCVAR_GET(vulkan_async_skip_incomplete_frames) &&
-@@ -3253,6 +3311,121 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3253,6 +3329,121 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
    in_render_pass_ = true;
  }
  
@@ -2519,7 +2631,7 @@ index 001f36b..d905774 100644
  void VulkanCommandProcessor::EndRenderPass() {
    assert_true(submission_open_);
    if (!in_render_pass_) {
-@@ -3661,6 +3834,109 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3661,6 +3852,109 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          }
        }
      }
@@ -2629,7 +2741,7 @@ index 001f36b..d905774 100644
    } else {
      // Disabling pixel shader for this case is also required by the pipeline
      // cache.
-@@ -3707,6 +3983,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3707,6 +4001,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        return draw_fail("begin_submission");
      }
  
@@ -2642,7 +2754,7 @@ index 001f36b..d905774 100644
      // Process primitives.
      if (!primitive_processor_->Process(primitive_processing_result)) {
        return draw_fail("primitive_processing");
-@@ -3835,10 +4117,26 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,10 +4135,26 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -2669,7 +2781,7 @@ index 001f36b..d905774 100644
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
                                      normalized_color_mask, *vertex_shader)) {
      return draw_fail("render_target_update");
-@@ -3977,6 +4275,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3977,6 +4293,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      return draw_fail("update_bindings");
    }
  
@@ -2677,7 +2789,7 @@ index 001f36b..d905774 100644
    // Ensure vertex buffers are resident.
    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-@@ -4111,6 +4410,38 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,6 +4428,41 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -2712,11 +2824,14 @@ index 001f36b..d905774 100644
 +    }
 +    ++run;
 +  }
++  // VS/PS pair for [nhl-gpushader]; the PS hash is rotated so a pair's tag stays unique.
++  nhl_gpu_draw_tag_ = vertex_shader->ucode_data_hash() ^
++                      (pixel_shader ? std::rotl(pixel_shader->ucode_data_hash(), 17) : 0) ^ 1;
 +  NhlGpuMark(kNhlGpuDraw);
    SubmitBarriersAndEnterRenderTargetCacheRenderPass(
        render_target_cache_->last_update_render_pass(),
        render_target_cache_->last_update_framebuffer());
-@@ -4389,25 +4720,101 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4389,25 +4741,101 @@ bool VulkanCommandProcessor::IssueCopy() {
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -2823,7 +2938,7 @@ index 001f36b..d905774 100644
      return false;
    }
  
-@@ -4424,6 +4831,104 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4424,6 +4852,104 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -2928,7 +3043,7 @@ index 001f36b..d905774 100644
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
      if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
          readback.mapped_data[index] != nullptr) {
-@@ -4473,6 +4978,41 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4473,6 +4999,41 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    };
  
    bool is_scaled = texture_cache_->IsDrawResolutionScaled();
@@ -2970,7 +3085,7 @@ index 001f36b..d905774 100644
    uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
    ReadbackBuffer& readback = readback_buffers_[resolve_key];
    readback.last_used_frame = frame_current_;
-@@ -4654,8 +5194,17 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4654,8 +5215,17 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    uint32_t read_index = write_index;
    if (use_delayed_sync) {
      read_index = 1 - write_index;
@@ -2990,7 +3105,7 @@ index 001f36b..d905774 100644
    }
  
    bool is_cache_miss = false;
-@@ -4682,6 +5231,9 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4682,6 +5252,9 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      uint8_t* destination = memory_->TranslatePhysical(written_address);
      if (destination) {
        std::memcpy(destination, readback.mapped_data[read_index], written_length);
@@ -3000,7 +3115,7 @@ index 001f36b..d905774 100644
      }
    }
  
-@@ -4970,9 +5522,41 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5543,41 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -3042,7 +3157,7 @@ index 001f36b..d905774 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5087,6 +5671,150 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5087,6 +5692,178 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
    }
  }
  
@@ -3070,7 +3185,9 @@ index 001f36b..d905774 100644
 +
 +void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
 +  if (!NhlGpuProfEnabled() || !submission_open_ || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
-+  if (cat == nhl_gpu_cur_cat_) return;
++  static const bool by_shader = std::getenv("REX_GPU_PROF_SHADERS") != nullptr;
++  const uint64_t tag = (by_shader && cat == kNhlGpuDraw) ? nhl_gpu_draw_tag_ : 0;
++  if (cat == nhl_gpu_cur_cat_ && tag == nhl_gpu_cur_tag_) return;
 +  if (nhl_gpu_count_ >= kNhlGpuQueries - 1) {
 +    ++nhl_gpu_overflow_;
 +    return;
@@ -3078,7 +3195,9 @@ index 001f36b..d905774 100644
 +  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 +                                               nhl_gpu_pool_, nhl_gpu_count_++);
 +  nhl_gpu_cats_.push_back(uint8_t(cat));
++  nhl_gpu_tags_.push_back(tag);
 +  nhl_gpu_cur_cat_ = cat;
++  nhl_gpu_cur_tag_ = tag;
 +  ++nhl_gpu_cat_marks_[cat];
 +}
 +
@@ -3110,7 +3229,9 @@ index 001f36b..d905774 100644
 +  nhl_gpu_pools_free_.pop_back();
 +  nhl_gpu_count_ = 0;
 +  nhl_gpu_cats_.clear();
++  nhl_gpu_tags_.clear();
 +  nhl_gpu_cur_cat_ = UINT32_MAX;
++  nhl_gpu_cur_tag_ = 0;
 +  NhlGpuMark(kNhlGpuOther);
 +}
 +
@@ -3134,6 +3255,8 @@ index 001f36b..d905774 100644
 +  p.pool = nhl_gpu_pool_;
 +  p.count = nhl_gpu_count_;
 +  p.cats = std::move(nhl_gpu_cats_);
++  p.tags = std::move(nhl_gpu_tags_);
++  nhl_gpu_tags_.clear();
 +  nhl_gpu_pending_.push_back(std::move(p));
 +  nhl_gpu_pool_ = VK_NULL_HANDLE;
 +  nhl_gpu_cats_.clear();
@@ -3153,7 +3276,14 @@ index 001f36b..d905774 100644
 +                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
 +      for (uint32_t i = 0; i + 1 < p.count; ++i) {
 +        const uint8_t cat = i < p.cats.size() ? p.cats[i] : uint8_t(kNhlGpuOther);
-+        if (ts[i + 1] > ts[i]) nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
++        if (ts[i + 1] > ts[i]) {
++          nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
++          if (i < p.tags.size() && p.tags[i]) {
++            auto& e = nhl_gpu_tag_ticks_[p.tags[i]];
++            e.first += ts[i + 1] - ts[i];
++            ++e.second;
++          }
++        }
 +      }
 +      if (ts[p.count - 1] > ts[0]) nhl_gpu_busy_ticks_ += ts[p.count - 1] - ts[0];
 +      if (nhl_gpu_last_end_tick_ && ts[0] > nhl_gpu_last_end_tick_) {
@@ -3183,6 +3313,19 @@ index 001f36b..d905774 100644
 +                "overflow={}{}",
 +                w, nhl_gpu_busy_ticks_ * k, nhl_gpu_idle_ticks_ * k, nhl_gpu_submissions_,
 +                nhl_gpu_overflow_, out);
++    if (!nhl_gpu_tag_ticks_.empty()) {
++      std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v(nhl_gpu_tag_ticks_.begin(),
++                                                                      nhl_gpu_tag_ticks_.end());
++      std::sort(v.begin(), v.end(),
++                [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
++      std::string top;
++      for (size_t i = 0; i < v.size() && i < 12; ++i) {
++        top += fmt::format(" {:016X}:{:.2f}ms/{}", v[i].first, v[i].second.first * k,
++                           v[i].second.second);
++      }
++      REXGPU_INFO("[nhl-gpushader] pairs={}{}", v.size(), top);
++      nhl_gpu_tag_ticks_.clear();
++    }
 +    std::memset(nhl_gpu_cat_ticks_, 0, sizeof(nhl_gpu_cat_ticks_));
 +    std::memset(nhl_gpu_cat_marks_, 0, sizeof(nhl_gpu_cat_marks_));
 +    nhl_gpu_busy_ticks_ = nhl_gpu_idle_ticks_ = nhl_gpu_submissions_ = nhl_gpu_overflow_ = 0;
@@ -3193,7 +3336,7 @@ index 001f36b..d905774 100644
  bool VulkanCommandProcessor::CanEndSubmissionImmediately() const {
    return !submission_open_ || (!scratch_buffer_used_ && !pipeline_cache_->IsCreatingPipelines());
  }
-@@ -5111,7 +5839,22 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5888,22 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -3216,7 +3359,7 @@ index 001f36b..d905774 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5127,6 +5870,23 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5127,6 +5919,23 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
        }
        frame_completed_ = frame;
      }
@@ -3240,7 +3383,7 @@ index 001f36b..d905774 100644
    }
  
    if (!submission_open_) {
-@@ -5160,6 +5920,8 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5160,6 +5969,8 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      primitive_processor_->BeginSubmission();
  
      texture_cache_->BeginSubmission(GetCurrentSubmission());
@@ -3249,7 +3392,7 @@ index 001f36b..d905774 100644
    }
  
    if (is_opening_frame) {
-@@ -5175,6 +5937,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5175,6 +5986,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
          shared_memory_and_edram_descriptor_set_;
      current_graphics_descriptor_set_values_up_to_date_ =
          UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram;
@@ -3262,7 +3405,7 @@ index 001f36b..d905774 100644
  
      // Reclaim pool pages - no need to do this every small submission since some
      // may be reused.
-@@ -5229,7 +5997,43 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5229,7 +6046,43 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    return true;
  }
  
@@ -3306,7 +3449,7 @@ index 001f36b..d905774 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5385,7 +6189,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,7 +6238,9 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -3316,7 +3459,7 @@ index 001f36b..d905774 100644
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
        return false;
-@@ -5430,6 +6236,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5430,6 +6285,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        return false;
      }
      uint64_t submission_current = GetCurrentSubmission();
@@ -3324,7 +3467,7 @@ index 001f36b..d905774 100644
      current_submission_wait_stage_masks_.clear();
      for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
        submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
-@@ -5703,6 +6510,30 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5703,6 +6559,30 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
    scissor_rect.extent.height = scissor.extent[1];
    SetScissor(scissor_rect);
  
@@ -3355,7 +3498,7 @@ index 001f36b..d905774 100644
    if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
      // Depth bias.
      float depth_bias_constant_factor, depth_bias_slope_factor;
-@@ -6206,8 +7037,20 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6206,8 +7086,20 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    // Alpha test.
    dirty |= system_constants_.alpha_test_reference != rb_alpha_ref;
    system_constants_.alpha_test_reference = rb_alpha_ref;
@@ -3378,7 +3521,7 @@ index 001f36b..d905774 100644
    dirty |= system_constants_.alpha_to_mask != alpha_to_mask;
    system_constants_.alpha_to_mask = alpha_to_mask;
  
-@@ -6559,32 +7402,46 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6559,32 +7451,46 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      sampler_count_pixel = 0;
      texture_count_pixel = 0;
    }
@@ -3388,9 +3531,6 @@ index 001f36b..d905774 100644
 -        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
 -
 -  // Make sure new descriptor sets are bound to the command buffer.
--
--  current_graphics_descriptor_sets_bound_up_to_date_ &=
--      current_graphics_descriptor_set_values_up_to_date_;
 +  // Reuse texture and sampler descriptor sets when the bindings have not
 +  // changed (this was the "TODO(Triang3l): Reuse texture and sampler bindings
 +  // if not changed" - the sets were invalidated unconditionally, so EVERY draw
@@ -3425,6 +3565,9 @@ index 001f36b..d905774 100644
 +  VkDescriptorSetLayout texture_set_layout_pixel =
 +      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref();
  
+-  current_graphics_descriptor_sets_bound_up_to_date_ &=
+-      current_graphics_descriptor_set_values_up_to_date_;
+-
 -  // Fill the texture and sampler write image infos.
 -
 -  bool write_vertex_textures =
@@ -3447,7 +3590,7 @@ index 001f36b..d905774 100644
      for (const VulkanShader::TextureBinding& texture_binding : textures_vertex) {
        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
        descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-@@ -6596,7 +7453,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6596,7 +7502,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      }
    }
    size_t vertex_sampler_image_info_offset = descriptor_write_image_info_.size();
@@ -3456,7 +3599,7 @@ index 001f36b..d905774 100644
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
           current_samplers_vertex_) {
        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-@@ -6604,7 +7461,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6604,7 +7510,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      }
    }
    size_t pixel_texture_image_info_offset = descriptor_write_image_info_.size();
@@ -3465,7 +3608,7 @@ index 001f36b..d905774 100644
      for (const VulkanShader::TextureBinding& texture_binding : *textures_pixel) {
        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
        descriptor_image_info.imageView = texture_cache_->GetActiveBindingOrNullImageView(
-@@ -6616,7 +7473,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6616,7 +7522,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      }
    }
    size_t pixel_sampler_image_info_offset = descriptor_write_image_info_.size();
@@ -3474,7 +3617,7 @@ index 001f36b..d905774 100644
      for (const std::pair<VulkanTextureCache::SamplerParameters, VkSampler>& sampler_pair :
           current_samplers_pixel_) {
        VkDescriptorImageInfo& descriptor_image_info = descriptor_write_image_info_.emplace_back();
-@@ -6624,6 +7481,116 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6624,6 +7530,116 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      }
    }
  
@@ -3591,7 +3734,7 @@ index 001f36b..d905774 100644
    // Write the new descriptor sets.
  
    // Consecutive bindings updated via a single VkWriteDescriptorSet must have
-@@ -6714,6 +7681,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6714,6 +7730,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
    // Only make valid if all descriptor sets have been allocated and written
    // successfully.
    current_graphics_descriptor_set_values_up_to_date_ |= write_descriptor_set_bits;
@@ -3605,10 +3748,18 @@ index 001f36b..d905774 100644
    // Bind the new descriptor sets.
    uint32_t descriptor_sets_needed = (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetCount) - 1;
 diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
-index b49e033..42cb128 100644
+index b49e033..e801703 100644
 --- a/src/graphics/vulkan/deferred_command_buffer.cpp
 +++ b/src/graphics/vulkan/deferred_command_buffer.cpp
-@@ -146,6 +146,22 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+@@ -48,6 +48,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+ 
+     switch (header.command) {
+       case Command::kVkBeginRenderPass: {
++        ++nhl_stats_[0];
+         auto& args = *reinterpret_cast<const ArgsVkBeginRenderPass*>(stream);
+         size_t offset_bytes = sizeof(ArgsVkBeginRenderPass);
+         VkRenderPassBeginInfo render_pass_begin_info;
+@@ -146,6 +147,22 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                                  rex::align(sizeof(ArgsVkCopyBuffer), alignof(VkBufferCopy))));
        } break;
  
@@ -3631,7 +3782,23 @@ index b49e033..42cb128 100644
        case Command::kVkCopyBufferToImage: {
          auto& args = *reinterpret_cast<const ArgsVkCopyBufferToImage*>(stream);
          dfn.vkCmdCopyBufferToImage(
-@@ -272,6 +288,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+@@ -191,6 +208,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+         break;
+ 
+       case Command::kVkBeginRendering: {
++        ++nhl_stats_[0];
+         auto& args = *reinterpret_cast<const ArgsVkBeginRendering*>(stream);
+         size_t offset_bytes =
+             rex::align(sizeof(ArgsVkBeginRendering), alignof(VkRenderingAttachmentInfo));
+@@ -230,6 +248,7 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+         break;
+ 
+       case Command::kVkPipelineBarrier: {
++        ++nhl_stats_[2];
+         auto& args = *reinterpret_cast<const ArgsVkPipelineBarrier*>(stream);
+         size_t barrier_offset_bytes = sizeof(ArgsVkPipelineBarrier);
+         const VkMemoryBarrier* memory_barriers = nullptr;
+@@ -272,6 +291,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
                                  args.query_count);
        } break;
  
@@ -3644,7 +3811,7 @@ index b49e033..42cb128 100644
          auto& args = *reinterpret_cast<const ArgsVkSetBlendConstants*>(stream);
          dfn.vkCmdSetBlendConstants(command_buffer, args.blend_constants);
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..4097b63 100644
+index 91ac08f..7daed99 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -966,10 +966,38 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
@@ -3821,8 +3988,18 @@ index 91ac08f..4097b63 100644
               DepthStencilMode::kFloat24Truncating ||
           pixel_shader_modification.pixel.depth_stencil_mode == DepthStencilMode::kFloat24Rounding);
    }
+@@ -3276,6 +3405,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     // Keep parity with D3D12 host-render-target path, where draws without
+     // color/depth attachments must run at 1x sample count.
+     multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++  } else if (render_target_cache_.host_msaa_1x()) {
++    // NHL performance mode: 1-sample host render targets for any guest sample count.
++    multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+   } else if (description.render_pass_key.msaa_samples == xenos::MsaaSamples::k2X &&
+              !render_target_cache_.IsMsaa2xSupported(subpass_has_attachments)) {
+     // Using sample 0 as 0 and 3 as 1 for 2x instead (not exactly the same
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
-index 0298f06..3908aaa 100644
+index 0298f06..6c15fa8 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
 +++ b/src/graphics/vulkan/render_target_cache.cpp
 @@ -11,10 +11,14 @@
@@ -3840,7 +4017,7 @@ index 0298f06..3908aaa 100644
  #include <tuple>
  #include <utility>
  #include <vector>
-@@ -35,12 +39,40 @@
+@@ -35,12 +39,43 @@
  #include <rex/graphics/xenos.h>
  #include <rex/logging.h>
  #include <rex/math.h>
@@ -3851,6 +4028,9 @@ index 0298f06..3908aaa 100644
                        "Vulkan render target implementation path")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
  
++REXCVAR_DEFINE_BOOL(nhl_force_host_msaa_1x, false, "GPU",
++                    "NHL performance mode: 1-sample host render targets for 2x/4x guest MSAA "
++                    "(no anti-aliasing, less GPU work); host render target path only");
 +REXCVAR_DEFINE_BOOL(nhl_rt_transfer_stats, false, "GPU/Vulkan",
 +                    "Log the EDRAM ownership transfers between host render targets once per second "
 +                    "([nhl-xfer]: tiles by source and destination sample count)");
@@ -3881,7 +4061,7 @@ index 0298f06..3908aaa 100644
  // DEFINE_string(
  //     render_target_path_vulkan, "",
  //     "Render target emulation path to use on Vulkan.\n"
-@@ -94,6 +126,51 @@ namespace shaders {
+@@ -94,6 +129,51 @@ namespace shaders {
  #include "../shaders/vulkan_spirv/resolve_full_8bpp_scaled_cs.h"
  }  // namespace shaders
  
@@ -3933,7 +4113,30 @@ index 0298f06..3908aaa 100644
  const VulkanRenderTargetCache::ResolveCopyShaderCode
      VulkanRenderTargetCache::kResolveCopyShaders[size_t(
          draw_util::ResolveCopyShaderIndex::kCount)] = {
-@@ -824,8 +901,19 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+@@ -648,6 +728,22 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     depth_float24_round_ = REXCVAR_GET(depth_float24_round);
+     depth_float24_convert_in_pixel_shader_ = REXCVAR_GET(depth_float24_convert_in_pixel_shader);
+ 
++    // 1-sample host images can't go through the host depth store / host depth transfer
++    // sources (compiled per guest sample count), so keep the host depth encoding equal to the
++    // guest one: unorm24 natively, float24 converted in the pixel shader.
++    host_msaa_1x_ = REXCVAR_GET(nhl_force_host_msaa_1x);
++    if (host_msaa_1x_) {
++      if (!depth_unorm24_vulkan_format_supported_) {
++        REXGPU_WARN(
++            "VulkanRenderTargetCache: nhl_force_host_msaa_1x needs D24S8 render targets - "
++            "disabled");
++        host_msaa_1x_ = false;
++      } else {
++        depth_float24_convert_in_pixel_shader_ = true;
++        REXGPU_INFO("VulkanRenderTargetCache: host render targets forced to 1 sample");
++      }
++    }
++
+     // Host depth storing pipeline layout.
+     VkDescriptorSetLayout host_depth_store_descriptor_set_layouts[] = {
+         // Destination EDRAM storage buffer.
+@@ -824,8 +920,19 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
      // Pixel (fragment) shader interlock.
  
      // Keep parity with D3D12 ROV, which uses 2x-as-4x in this path.
@@ -3954,7 +4157,7 @@ index 0298f06..3908aaa 100644
  
      // Blending is done in linear space directly in shaders.
      gamma_render_target_as_unorm16_ = false;
-@@ -1163,6 +1251,34 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1163,6 +1270,34 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
        const draw_util::ResolveCopyShaderInfo& copy_shader_info =
            draw_util::resolve_copy_shader_info[size_t(copy_shader)];
        bool direct_resolved = false;
@@ -3989,7 +4192,7 @@ index 0298f06..3908aaa 100644
        if (GetPath() == Path::kHostRenderTargets) {
          if (REXCVAR_GET(direct_host_resolve)) {
            direct_resolved =
-@@ -1302,6 +1418,31 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1302,6 +1437,31 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();
@@ -4021,7 +4224,7 @@ index 0298f06..3908aaa 100644
    if (clear_depth || clear_color) {
      switch (GetPath()) {
        case Path::kHostRenderTargets: {
-@@ -1322,6 +1463,58 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1322,6 +1482,58 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
          cleared = true;
        } break;
        case Path::kPixelShaderInterlock: {
@@ -4080,7 +4283,7 @@ index 0298f06..3908aaa 100644
          UseEdramBuffer(EdramBufferUsage::kComputeWrite);
          // Should be safe to only commit once (if was accessed as unordered or
          // with fragment shader interlock previously - if there was nothing to
-@@ -1344,6 +1537,33 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+@@ -1344,6 +1556,33 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
            command_processor_.SubmitBarriers(true);
            command_buffer.CmdVkDispatch(clear_group_count.first, clear_group_count.second, 1);
          }
@@ -4114,7 +4317,7 @@ index 0298f06..3908aaa 100644
          if (clear_color) {
            command_processor_.BindExternalComputePipeline(
                resolve_info.color_edram_info.format_is_64bpp ? resolve_fsi_clear_64bpp_pipeline_
-@@ -1396,9 +1616,77 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+@@ -1396,9 +1635,77 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
      case Path::kHostRenderTargets: {
        RenderTarget* const* depth_and_color_render_targets =
            last_update_accumulated_render_targets();
@@ -4195,7 +4398,37 @@ index 0298f06..3908aaa 100644
  
        if (depth_and_color_render_targets[0]) {
          render_pass_key.depth_and_color_used |= 1 << 0;
-@@ -2131,6 +2419,51 @@ void VulkanRenderTargetCache::GetEdramBufferUsageMasks(EdramBufferUsage usage,
+@@ -1568,7 +1875,7 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(RenderPassK
+   }
+ 
+   VkSampleCountFlagBits samples;
+-  switch (key.msaa_samples) {
++  switch (host_msaa_1x_ ? xenos::MsaaSamples::k1X : key.msaa_samples) {
+     case xenos::MsaaSamples::k1X:
+       samples = VK_SAMPLE_COUNT_1_BIT;
+       break;
+@@ -1761,7 +2068,8 @@ VkFormat VulkanRenderTargetCache::GetColorOwnershipTransferVulkanFormat(
+     *is_integer_out = true;
+   }
+   VkSampleCountFlagBits transfer_sample_count =
+-      VkSampleCountFlagBits(uint32_t(1) << uint32_t(msaa_samples));
++      host_msaa_1x_ ? VK_SAMPLE_COUNT_1_BIT
++                    : VkSampleCountFlagBits(uint32_t(1) << uint32_t(msaa_samples));
+   if (transfer_sample_count == VK_SAMPLE_COUNT_2_BIT && !msaa_2x_attachments_supported_) {
+     // 2x guest color render targets are allocated as 4x host render targets in
+     // this mode.
+@@ -1874,7 +2182,9 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+   image_create_info.extent.depth = 1;
+   image_create_info.mipLevels = 1;
+   image_create_info.arrayLayers = 1;
+-  if (key.msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_attachments_supported_) {
++  if (host_msaa_1x_) {
++    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++  } else if (key.msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_attachments_supported_) {
+     image_create_info.samples = VK_SAMPLE_COUNT_4_BIT;
+   } else {
+     image_create_info.samples = VkSampleCountFlagBits(uint32_t(1) << uint32_t(key.msaa_samples));
+@@ -2131,6 +2441,51 @@ void VulkanRenderTargetCache::GetEdramBufferUsageMasks(EdramBufferUsage usage,
    }
  }
  
@@ -4247,7 +4480,7 @@ index 0298f06..3908aaa 100644
  void VulkanRenderTargetCache::UseEdramBuffer(EdramBufferUsage new_usage) {
    if (edram_buffer_usage_ == new_usage) {
      return;
-@@ -2139,6 +2472,23 @@ void VulkanRenderTargetCache::UseEdramBuffer(EdramBufferUsage new_usage) {
+@@ -2139,6 +2494,23 @@ void VulkanRenderTargetCache::UseEdramBuffer(EdramBufferUsage new_usage) {
    VkAccessFlags src_access_mask, dst_access_mask;
    GetEdramBufferUsageMasks(edram_buffer_usage_, src_stage_mask, src_access_mask);
    GetEdramBufferUsageMasks(new_usage, dst_stage_mask, dst_access_mask);
@@ -4271,7 +4504,78 @@ index 0298f06..3908aaa 100644
    if (command_processor_.PushBufferMemoryBarrier(edram_buffer_, 0, VK_WHOLE_SIZE, src_stage_mask,
                                                   dst_stage_mask, src_access_mask,
                                                   dst_access_mask)) {
-@@ -4546,6 +4896,360 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+@@ -2436,7 +2808,9 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+   // Generating SPIR-V 1.0, no need to add bindings to the entry point's
+   // interface until SPIR-V 1.4.
+   // Color source.
+-  bool source_is_multisampled = key.source_msaa_samples != xenos::MsaaSamples::k1X;
++  // Host image sampling only - the EDRAM math below keeps using key.source_msaa_samples.
++  bool source_is_multisampled =
++      key.source_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_;
+   spv::Id source_color_texture = spv::NoResult;
+   if (pipeline_layout_info.used_descriptor_sets & kTransferUsedDescriptorSetColorTextureBit) {
+     source_color_texture = builder.createVariable(
+@@ -2514,7 +2888,9 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+     host_depth_source_texture = builder.createVariable(
+         spv::NoPrecision, spv::StorageClassUniformConstant,
+         builder.makeImageType(type_float, spv::Dim2D, false, false,
+-                              key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X, 1,
++                              key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X &&
++                                  !host_msaa_1x_,
++                              1,
+                               spv::ImageFormatUnknown),
+         "xe_transfer_host_depth");
+     builder.addDecoration(
+@@ -2586,7 +2962,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+   main_interface.push_back(input_fragment_coord);
+   spv::Id input_sample_id = spv::NoResult;
+   spv::Id spec_const_sample_id = spv::NoResult;
+-  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
++  // With 1-sample host images the destination has only host sample 0.
++  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_) {
+     if (device_properties.sampleRateShading) {
+       // One draw for all samples.
+       builder.addCapability(spv::CapabilitySampleRateShading);
+@@ -2668,7 +3045,9 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+ 
+   // Load the destination sample index.
+   spv::Id dest_sample_id = spv::NoResult;
+-  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
++  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && host_msaa_1x_) {
++    dest_sample_id = builder.makeUintConstant(0);
++  } else if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
+     if (device_properties.sampleRateShading) {
+       assert_true(input_sample_id != spv::NoResult);
+       dest_sample_id = builder.createUnaryOp(spv::OpBitcast, type_uint,
+@@ -3043,7 +3422,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+       builder.createCompositeConstruct(type_int2, id_vector_temp),
+   };
+   spv::Id source_sample_ids_int[2] = {};
+-  if (key.source_msaa_samples != xenos::MsaaSamples::k1X) {
++  if (source_is_multisampled) {
+     source_sample_ids_int[0] = builder.createUnaryOp(spv::OpBitcast, type_int, source_sample_id);
+   } else {
+     source_texture_parameters.lod = builder.makeIntConstant(0);
+@@ -4049,7 +4428,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+             id_vector_temp.push_back(host_depth_source_pixel_y_int);
+             host_depth_source_texture_parameters.coords =
+                 builder.createCompositeConstruct(type_int2, id_vector_temp);
+-            if (key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X) {
++            if (key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_) {
+               host_depth_source_texture_parameters.sample =
+                   builder.createUnaryOp(spv::OpBitcast, type_int, host_depth_source_sample_id);
+             } else {
+@@ -4298,7 +4677,8 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+     return nullptr;
+   }
+ 
+-  uint32_t dest_sample_count = uint32_t(1) << uint32_t(key.shader_key.dest_msaa_samples);
++  uint32_t dest_sample_count =
++      host_msaa_1x_ ? 1 : uint32_t(1) << uint32_t(key.shader_key.dest_msaa_samples);
+   bool dest_is_masked_sample = dest_sample_count > 1 && !device_properties.sampleRateShading;
+ 
+   VkPipelineShaderStageCreateInfo shader_stages[2];
+@@ -4546,6 +4926,360 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
    return transfer_pipelines_.emplace(key, pipelines).first->second.data();
  }
  
@@ -4632,7 +4936,7 @@ index 0298f06..3908aaa 100644
  void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      uint32_t render_target_count, RenderTarget* const* render_targets,
      const std::vector<Transfer>* render_target_transfers,
-@@ -4553,6 +5257,26 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4553,6 +5287,26 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
      const Transfer::Rectangle* resolve_clear_rectangle) {
    assert_true(GetPath() == Path::kHostRenderTargets);
  
@@ -4659,6 +4963,26 @@ index 0298f06..3908aaa 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    uint64_t current_submission = command_processor_.GetCurrentSubmission();
    DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+@@ -5452,7 +6206,9 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+   builder.addDecoration(edram_buffer, spv::DecorationDescriptorSet, kDumpDescriptorSetEdram);
+   builder.addDecoration(edram_buffer, spv::DecorationBinding, 0);
+   // Color or depth source.
+-  bool source_is_multisampled = key.msaa_samples != xenos::MsaaSamples::k1X;
++  // Guest sample layout (EDRAM addressing) vs host image sampling.
++  bool source_is_guest_multisampled = key.msaa_samples != xenos::MsaaSamples::k1X;
++  bool source_is_multisampled = source_is_guest_multisampled && !host_msaa_1x_;
+   bool source_is_uint;
+   if (key.is_depth) {
+     source_is_uint = false;
+@@ -5625,7 +6381,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+   // Get the source pixel coordinate and the sample index within the pixel.
+   spv::Id source_pixel_x = source_sample_x, source_pixel_y = source_sample_y;
+   spv::Id source_sample_id = spv::NoResult;
+-  if (source_is_multisampled) {
++  if (source_is_guest_multisampled) {
+     spv::Id const_uint_1 = builder.makeUintConstant(1);
+     source_pixel_y =
+         builder.createBinOp(spv::OpShiftRightLogical, type_uint, source_sample_y, const_uint_1);
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
 index ecbd940..5f0239e 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
@@ -5159,6 +5483,76 @@ index c7c440d..87ae3ce 100644
    // Pump SDL events to ensure controller state is up to date.
    bool is_queued = false;
    sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index 57fd161..fb1023e 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -1176,8 +1176,11 @@ void KeInitializeDpc_entry(ppc_ptr_t<XDPC> dpc, mapped_void routine, mapped_void
+ }
+ 
+ u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
+-  assert_always("DPC does not dispatch yet; going to hang!");
+-
++  // DPCs used to be queued and never run. NHL Legacy's D3D queues work for its per-core
++  // worker threads (sub_827ED828 / sub_827FAEF0) and wakes them only through a DPC whose
++  // routine (sub_827FAA18) calls KeSetEvent; when a worker sat in its infinite wait, the
++  // work was never processed and boot stalled. Run each queued DPC on the kernel dispatch
++  // thread (in order, like a DPC queue drained at DISPATCH_LEVEL).
+   uint32_t list_entry_ptr = dpc.guest_address() + 4;
+ 
+   // Lock dispatcher.
+@@ -1194,6 +1197,51 @@ u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
+   dpc->arg2 = (uint32_t)arg2;
+ 
+   dpc_list->Insert(list_entry_ptr);
++  {
++    static std::atomic<uint64_t> queued{0};
++    const uint64_t n = ++queued;
++    if (n <= 5 || (n & (n - 1)) == 0) {
++      REXKRNL_INFO("[nhl-dpc] queued #{} routine={:08X}", n, uint32_t(dpc->routine));
++    }
++  }
++
++  const uint32_t dpc_ptr = dpc.guest_address();
++  REX_KERNEL_STATE()->QueueDispatch([dpc_ptr, list_entry_ptr]() {
++    auto kernel_state = REX_KERNEL_STATE();
++    uint32_t routine, context, a1, a2;
++    {
++      // KeRemoveQueueDpc may have dequeued it meanwhile; then it must not run.
++      auto lock = rex::thread::global_critical_region::AcquireDirect();
++      auto list = kernel_state->dpc_list();
++      if (!list->IsQueued(list_entry_ptr)) {
++        return;
++      }
++      list->Remove(list_entry_ptr);
++      auto d = kernel_state->memory()->TranslateVirtual<XDPC*>(dpc_ptr);
++      routine = d->routine;
++      context = d->context;
++      a1 = d->arg1;
++      a2 = d->arg2;
++    }
++    if (!routine) {
++      return;
++    }
++    // DeferredRoutine(Dpc, DeferredContext, SystemArgument1, SystemArgument2).
++    uint64_t args[] = {dpc_ptr, context, a1, a2};
++    kernel_state->function_dispatcher()->Execute(XThread::GetCurrentThread()->thread_state(),
++                                                 routine, args, rex::countof(args));
++    // [nhl-dpc]: DPCs run, at most one line per second.
++    static std::atomic<uint64_t> ran{0};
++    static std::atomic<int64_t> last_log_ms{0};
++    ++ran;
++    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++    if (now_ms - last_log_ms.load() >= 1000) {
++      last_log_ms = now_ms;
++      REXKRNL_INFO("[nhl-dpc] ran={} last routine={:08X}", ran.load(), routine);
++    }
++  });
+ 
+   return 1;
+ }
 diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
 index fc46d86..b5bfeb4 100644
 --- a/src/system/CMakeLists.txt
@@ -5176,6 +5570,23 @@ index fc46d86..b5bfeb4 100644
 +if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include")
 +    target_compile_definitions(rexruntime PUBLIC REX_HAS_FIDELITYFX_SDK=1)
 +endif()
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 697399c..22cfb97 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -1175,6 +1175,12 @@ void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESUL
+   CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+ }
+ 
++void KernelState::QueueDispatch(std::function<void()> fn) {
++  auto global_lock = global_critical_region_.Acquire();
++  dispatch_queue_.push_back(std::move(fn));
++  dispatch_cond_.notify_all();
++}
++
+ void KernelState::CompleteOverlappedDeferred(std::function<void()> completion_callback,
+                                              uint32_t overlapped_ptr, X_RESULT result,
+                                              std::function<void()> pre_callback,
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
 index 7360ed9..f572579 100644
 --- a/src/ui/presenter.cpp

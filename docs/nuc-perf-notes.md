@@ -308,3 +308,17 @@ Playable build tagged `playable-2026-10-31`, backup `/home/claude/nhl-backup/sta
   ~720k tiles/s; images identical with poison (menus, gameplay, replay, close-up). A/B running.
 - Boot stall caught once more (vs60-A1): all guest threads blocked in NtWaitForSingleObjectEx / KeWaitFor*,
   nobody runnable → lost wakeup; backtrace depth raised to 40 frames to see the guest functions next time.
+- Clear-through A/B (3 runs each) + GPU profile: no gain (rt 1.61 ms without vs 1.93 ms with — compute clears cost as much
+  as the copies). Stays off.
+- Alertable poll slice 1 vs 4 ms (`REX_ALERTABLE_POLL_MS`): no change in process CPU (267–282 %), GPU clock or fps.
+- 1x host MSAA (`nhl_force_host_msaa_1x`): GPU 15.7 vs 16.5 ms/frame, draws unchanged (10.15 vs 10.37) — MSAA is not the
+  draw cost. Stays off.
+- GPU profile now (play config): 16.5 ms/frame — draw 10.4 (63 %), resolve 2.4, rt 1.6, tex 1.4, upload 0.23.
+- Per shader pair (`REX_GPU_PROF_SHADERS=1`, `[nhl-gpushader]`): flat — top pair 4.6 % of draw time, top 10 ~30 %.
+- `REX_CMD_STATS=1` (`[nhl-cmdstats]`): per gameplay frame 75–110 render pass begins, 440–590 pipeline binds,
+  150–265 barriers for ~1650 draws → fixed per-pass/barrier cost is the prime suspect for the draw time on the iGPU.
+- INTEL_MEASURE only captured the presenter's command buffers, not the game's — not usable here.
+- Boot stall: likely cause found by code reading — the SDK never dispatched DPCs (`KeInsertQueueDpc` only queued them;
+  release builds compile out the "going to hang" assert); NHL's D3D wakes its per-core workers via a DPC that calls
+  KeSetEvent. Fix: run queued DPCs on the kernel dispatch thread (`[nhl-dpc]` logs). 10/10 boots OK with the fix, but no
+  DPC was queued in those boots or in a full run, so the cause is not yet confirmed.
