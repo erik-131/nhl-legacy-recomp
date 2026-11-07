@@ -1,0 +1,60 @@
+#version 450
+// NHL Legacy enhancement: in-place color grade on the guest-output image, run as a
+// compute pass right after the swap gamma-apply (see VulkanCommandProcessor::
+// IssueSwap). The image is kGuestOutputFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+// (rgb10_a2), already proven storage-writable by the gamma pass. All knobs come
+// from push constants (driven by present_grade_* cvars); the defaults below are
+// identity, so the pass is a no-op until the user changes a slider.
+//
+// Compile: glslangValidator -V --vn nhl_grade_cs nhl_grade.comp -o ../nhl_grade_cs.h
+
+layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
+
+layout(rgb10_a2, binding = 0) uniform image2D img;
+
+layout(push_constant) uniform Push {
+  uint width;
+  uint height;
+  float exposure;    // linear multiplier (CPU passes exp2(EV)); identity = 1
+  float contrast;    // around mid-gray; identity = 1
+  float saturation;  // identity = 1
+  float brightness;  // additive; identity = 0
+  float wb_r;        // white-balance per-channel mul; identity = 1,1,1
+  float wb_g;
+  float wb_b;
+  float tonemap;     // 0..1 blend toward ACES filmic; identity = 0
+} pc;
+
+vec3 aces_film(vec3 x) {
+  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+  uvec2 p = gl_GlobalInvocationID.xy;
+  if (p.x >= pc.width || p.y >= pc.height) {
+    return;
+  }
+  ivec2 ip = ivec2(p);
+  vec4 src = imageLoad(img, ip);
+  vec3 c = src.rgb;
+
+  // Exposure + white balance.
+  c *= pc.exposure;
+  c *= vec3(pc.wb_r, pc.wb_g, pc.wb_b);
+
+  // Optional ACES filmic tone-map, blended by strength.
+  if (pc.tonemap > 0.0) {
+    c = mix(c, aces_film(c), pc.tonemap);
+  }
+
+  // Contrast around mid-gray + brightness.
+  c = (c - 0.5) * pc.contrast + 0.5 + pc.brightness;
+
+  // Saturation (toward Rec.709 luma).
+  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  c = mix(vec3(luma), c, pc.saturation);
+
+  c = clamp(c, 0.0, 1.0);
+  imageStore(img, ip, vec4(c, src.a));
+}

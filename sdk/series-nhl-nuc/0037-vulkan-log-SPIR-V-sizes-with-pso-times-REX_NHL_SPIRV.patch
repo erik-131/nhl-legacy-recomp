@@ -1,0 +1,88 @@
+From 491f133e2d2adaa350914eb7d4f9c194ec84a768 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 18:29:43 +0100
+Subject: [PATCH 37/41] vulkan: log SPIR-V sizes with pso times,
+ REX_NHL_SPIRV_DUMP, nhl_fast_pixel_math (default off)
+
+---
+ .../pipeline/shader/spirv_translator_alu.cpp  |  7 +++-
+ src/graphics/vulkan/pipeline_cache.cpp        | 37 ++++++++++++++++++-
+ 2 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 3031e63..93a562a 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -23,6 +23,9 @@
+ 
+ REXCVAR_DEFINE_BOOL(nhl_fast_vertex_math, false, "GPU",
+                     "Vertex shaders: no 0 * x check where x can't be infinite or NaN");
++REXCVAR_DEFINE_BOOL(nhl_fast_pixel_math, false, "GPU",
++                    "Pixel shaders: no 0 * x check where x can't be infinite or NaN (smaller shaders, faster "
++                    "to compile; a texture or constant that is infinite or NaN would then give NaN, not 0)");
+ 
+ namespace rex::graphics {
+ 
+@@ -30,7 +33,9 @@ namespace rex::graphics {
+ // constants or vertex data are, and then 0 * x is 0 anyway, so the Shader Model 3 check is dropped: it
+ // costs several instructions per product, and NHL's skinning shaders have hundreds of products per vertex.
+ bool SpirvShaderTranslator::NhlSkipMultiplyZeroCheck() const {
+-  return is_vertex_shader() && !nhl_infinity_source_seen_ && REXCVAR_GET(nhl_fast_vertex_math);
++  if (nhl_infinity_source_seen_) return false;
++  return (is_vertex_shader() && REXCVAR_GET(nhl_fast_vertex_math)) ||
++         (is_pixel_shader() && REXCVAR_GET(nhl_fast_pixel_math));
+ }
+ 
+ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 56a9e81..5e1934c 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -3667,9 +3667,42 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+         uint32_t(use_dynamic_rendering));
+     return false;
+   }
+-  REXGPU_INFO("[nhl-pso] {} {:.1f} ms", creating_placeholder ? "placeholder" : "real",
++  REXGPU_INFO("[nhl-pso] {} {:.1f} ms vs_spirv={} ps_spirv={}", creating_placeholder ? "placeholder" : "real",
+               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - nhl_create_start)
+-                  .count());
++                  .count(),
++              creation_arguments.vertex_shader ? creation_arguments.vertex_shader->translated_binary().size() : 0,
++              creation_arguments.pixel_shader ? creation_arguments.pixel_shader->translated_binary().size() : 0);
++  // REX_NHL_SPIRV_DUMP=<dir>: write the translated SPIR-V of every compiled pipeline (once per shader), named
++  // with the compile time, for offline inspection with spirv-dis / spirv-opt.
++  if (const char* dump_dir = std::getenv("REX_NHL_SPIRV_DUMP"); dump_dir && *dump_dir) {
++    const double nhl_ms = std::chrono::duration<double, std::milli>(
++                              std::chrono::steady_clock::now() - nhl_create_start).count();
++    auto dump = [&](const char* stage, const VulkanShader::VulkanTranslation* t) {
++      if (!t) return;
++      const auto& bin = t->translated_binary();
++      char name[512];
++      std::snprintf(name, sizeof(name), "%s/%s_%016llX_m%016llX.spv", dump_dir, stage,
++                    (unsigned long long)t->shader().ucode_data_hash(),
++                    (unsigned long long)t->modification());
++      if (FILE* f = std::fopen(name, "rb")) {
++        std::fclose(f);
++        return;
++      }
++      if (FILE* f = std::fopen(name, "wb")) {
++        std::fwrite(bin.data(), 1, bin.size(), f);
++        std::fclose(f);
++        std::snprintf(name, sizeof(name), "%s/%s_%016llX_m%016llX.txt", dump_dir, stage,
++                      (unsigned long long)t->shader().ucode_data_hash(),
++                      (unsigned long long)t->modification());
++        if (FILE* g = std::fopen(name, "wb")) {
++          std::fprintf(g, "pipeline_compile_ms=%.1f spirv_bytes=%zu\n", nhl_ms, bin.size());
++          std::fclose(g);
++        }
++      }
++    };
++    dump("vs", creation_arguments.vertex_shader);
++    dump("ps", creation_arguments.pixel_shader);
++  }
+   bool was_placeholder =
+       creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
+   VkPipeline old_pipeline =
+-- 
+2.47.3
+

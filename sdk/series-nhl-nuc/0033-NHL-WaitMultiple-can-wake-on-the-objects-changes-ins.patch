@@ -1,0 +1,175 @@
+From 57a1dfe631a72c5517936cf75f48a38e00722096 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 05:48:05 +0100
+Subject: [PATCH 33/41] NHL: WaitMultiple can wake on the objects' changes
+ instead of polling every 1 ms (nhl_wait_multiple_notify, off), REX_WAIT_STATS
+
+~570 calls and ~1800 sleeps per second in gameplay. A/B in one match, also on two E-cores: no fps or CPU change.
+---
+ src/core/threading_posix.cpp | 65 +++++++++++++++++++++++++++++++++++-
+ 1 file changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 1dc625c..907688a 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -38,6 +38,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+ 
+ #include <rex/assert.h>
+ #include <rex/chrono/chrono_steady_cast.h>
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/thread/timer_queue.h>
+ 
+@@ -63,6 +64,10 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
+ #define REX_HAS_SIGEV_THREAD_ID 0
+ #endif
+ 
++REXCVAR_DEFINE_BOOL(nhl_wait_multiple_notify, false, "Threading",
++                    "WaitMultiple wakes when one of its objects changes instead of polling every 1 ms")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::thread {
+ 
+ #if REX_PLATFORM_ANDROID
+@@ -296,6 +301,16 @@ class PosixConditionBase {
+   virtual ~PosixConditionBase() = default;
+   virtual bool Signal() = 0;
+ 
++  // Wakes WaitMultiple callers on this object. Called after the state changed: a waiter registers before
++  // it checks, so either it sees the change or this sees it and bumps the generation it waits on.
++  void NotifyMultiWaiters() {
++    if (multi_waiters_.load() > 0) {
++      multi_generation_.fetch_add(1);
++      { std::lock_guard<std::mutex> lock(multi_mutex_); }
++      multi_cond_.notify_all();
++    }
++  }
++
+   // Events hand a signal to the threads waiting when it arrives, like KeSetEvent, so a wait is
+   // registered first: a later arrival can't take the signal, and a reset right after a set doesn't
+   // lose it. false: this object doesn't queue waiters.
+@@ -355,7 +370,31 @@ class PosixConditionBase {
+                         ? std::chrono::steady_clock::time_point::max()
+                         : start_time + timeout;
+ 
++    // REX_WAIT_STATS=1: how often this 1 ms polling loop runs.
++    static const bool nhl_wait_stats = std::getenv("REX_WAIT_STATS") != nullptr;
++    static std::atomic<uint64_t> nhl_wait_calls{0}, nhl_wait_sleeps{0};
++    if (nhl_wait_stats && !(nhl_wait_calls.fetch_add(1) % 2000)) {
++      REXLOG_INFO("[nhl-waitmulti] calls={} sleeps={} handles={}", nhl_wait_calls.load(),
++                  nhl_wait_sleeps.load(), handles.size());
++    }
++
++    // Until nhl_wait_multiple_notify, this only polled every 1 ms: ~570 calls and ~1800 sleeps per second.
++    const bool notify = REXCVAR_GET(nhl_wait_multiple_notify);
++    if (notify) {
++      for (PosixConditionBase* handle : handles) handle->multi_waiters_.fetch_add(1);
++    }
++    struct MultiWaitersGuard {
++      const std::vector<PosixConditionBase*>& handles;
++      bool active;
++      ~MultiWaitersGuard() {
++        if (active) {
++          for (PosixConditionBase* handle : handles) handle->multi_waiters_.fetch_sub(1);
++        }
++      }
++    } multi_waiters_guard{handles, notify};
++
+     while (true) {
++      const uint64_t generation = multi_generation_.load();
+       size_t first_signaled = std::numeric_limits<size_t>::max();
+       bool condition_met = false;
+       bool all_locked = true;
+@@ -431,7 +470,18 @@ class PosixConditionBase {
+         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+       }
+ 
+-      if (timeout == std::chrono::milliseconds::max()) {
++      if (nhl_wait_stats) {
++        nhl_wait_sleeps.fetch_add(1);
++      }
++      if (notify) {
++        // Still looks every 1 ms, for anything that changes state without NotifyMultiWaiters.
++        auto wait_time = std::chrono::milliseconds(1);
++        if (timeout != std::chrono::milliseconds::max()) {
++          wait_time = std::min(wait_time, std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now));
++        }
++        std::unique_lock<std::mutex> lock(multi_mutex_);
++        multi_cond_.wait_for(lock, wait_time, [&] { return multi_generation_.load() != generation; });
++      } else if (timeout == std::chrono::milliseconds::max()) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+       } else {
+         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+@@ -450,6 +500,12 @@ class PosixConditionBase {
+   inline virtual void post_execution() = 0;
+   std::condition_variable cond_;
+   std::mutex mutex_;
++
++ private:
++  std::atomic<int> multi_waiters_{0};
++  static inline std::mutex multi_mutex_;
++  static inline std::condition_variable multi_cond_;
++  static inline std::atomic<uint64_t> multi_generation_{0};
+ };
+ 
+ // There really is no native POSIX handle for a single wait/signal construct
+@@ -479,6 +535,7 @@ class PosixCondition<Event> : public PosixConditionBase {
+       signal_ = true;
+     }
+     cond_.notify_all();
++    NotifyMultiWaiters();
+     return true;
+   }
+ 
+@@ -561,6 +618,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+     }
+     count_ += release_count;
+     cond_.notify_all();
++    NotifyMultiWaiters();
+     return true;
+   }
+ 
+@@ -569,6 +627,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
+   inline void post_execution() override {
+     count_--;
+     cond_.notify_all();
++    NotifyMultiWaiters();
+   }
+   uint32_t count_;
+   const uint32_t maximum_count_;
+@@ -593,6 +652,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
+       // Free to be acquired by another thread
+       if (count_ == 0) {
+         cond_.notify_all();
++        NotifyMultiWaiters();
+       }
+       return true;
+     }
+@@ -625,6 +685,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
+     std::lock_guard<std::mutex> lock(mutex_);
+     signal_ = true;
+     cond_.notify_all();
++    NotifyMultiWaiters();
+     return true;
+   }
+ 
+@@ -1057,6 +1118,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
+       exit_code_ = exit_code;
+       signaled_ = true;
+       cond_.notify_all();
++      NotifyMultiWaiters();
+     }
+     if (is_current_thread) {
+       pthread_exit(reinterpret_cast<void*>(exit_code));
+@@ -1568,6 +1630,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+     thread->handle_.exit_code_ = 0;
+     thread->handle_.signaled_ = true;
+     thread->handle_.cond_.notify_all();
++    thread->handle_.NotifyMultiWaiters();
+   }
+ 
+   current_thread_ = nullptr;
+-- 
+2.47.3
+

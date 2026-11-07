@@ -1,0 +1,80 @@
+# === Build output (multi-GB) ===
+/out/
+
+# === Regenerable recompiled sources (~374M each) ===
+# Regenerate with: cmake --build <build> --target nhllegacy_codegen
+# (needs the rexglue SDK + the game XEX). Not tracked to keep the repo lean.
+/generated/
+/generated.bak_080/
+
+# === Large GPU trace captures (~439M; regenerable) ===
+/gpu_trace/
+*.xtr
+
+# === Game image — copyrighted, not redistributable ===
+/assets/
+*.xex
+
+# === Backups ===
+*.bak_080
+*.bak2
+
+# === Root-level build/run artifacts ===
+/*.log
+/*.png
+/*.bin
+/run_stderr.log
+/run_stdout.log
+
+# === Local editor/tool settings ===
+.claude/settings.local.json
+
+# === Vendored third-party (M0c) — fetched/pinned, not committed (~350M, prebuilt bins/headers) ===
+# Reproduce with: pwsh tools/fetch_thirdparty.ps1   (pinned commits in docs/highcut-m0-vendoring.md)
+/third_party/
+/tools/xenos_recomp/
+
+# Bundled LGPL ffmpeg.exe for the VP6 movie bridge (~109M) — not committed.
+# Reproduce with: powershell -File release\fetch_ffmpeg.ps1
+/release/vendor/
+
+# C-5g note: the plume framebuffer-readback patch lives in third_party/plume/plume_vulkan.cpp,
+# but third_party/plume/ is an EMBEDDED git repo (vendored clone), so the parent repo cannot
+# track files inside it. The change is recorded in docs/plume-readback-patch.md (re-apply after
+# any plume re-vendor). Not un-ignoring it here since git can't add it through the nested repo.
+
+# PGO capture data (regenerable via _build_vk_pgogen.bat + llvm-profdata; see
+# the vk-perf-profile-findings memory). Large binary profiles, not for git.
+/pgo/
+
+# === Local dev/diagnostic driver scripts, now under scripts/ (scratch; the
+# canonical build .bat files — scripts/_game_ffx_build.bat, _ffx_sdk_*.bat,
+# _build_*.bat — ARE tracked) ===
+/scripts/_*.ps1
+/scripts/run_*.ps1
+/_*.png
+/nullcall_ctx.txt
+
+# Python diagnostic scratch + bytecode caches (real tools like cba_parse.py
+# and highcut_packet_decode.py do NOT start with "_", so stay tracked).
+/tools/__pycache__/
+/tools/_*.py
+
+# Rust scratch-tool build output + working game DBs (regenerable / game-derived).
+/tools/stick_widen/target/
+/tools/stick_widen/scratch/
+/tools/vp6-converter/target/
+
+# NHL12 sibling-dev decompilation reference: the vendored Xenia-derived GPU
+# source tree + its archive are third-party and large — reference only, not our
+# build. (The hand-written RE markdown notes alongside it stay visible.)
+/docs/nhl12-decomp-reference/gpu/
+/docs/nhl12-decomp-reference/gpu.7z
+
+# Vendored ReXGlue SDK (fetched + pinned + patched by scripts/setup_sdk.ps1)
+/third_party/rexglue-sdk/
+
+# macOS port: local build tree and extracted disc content (never commit game data)
+/build/
+/game/
+__pycache__/

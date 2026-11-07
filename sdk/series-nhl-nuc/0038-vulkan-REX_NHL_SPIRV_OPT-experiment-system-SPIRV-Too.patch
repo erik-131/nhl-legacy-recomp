@@ -1,0 +1,79 @@
+From 2d6facc6d63b38a01da31f2c822876d624ac4caa Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 19:19:06 +0100
+Subject: [PATCH 38/41] vulkan: REX_NHL_SPIRV_OPT experiment (system
+ SPIRV-Tools optimizer before shader module creation, dev only)
+
+---
+ src/graphics/CMakeLists.txt    |  9 +++++++++
+ src/graphics/vulkan/shader.cpp | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 6dc19af..9255783 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -159,6 +159,15 @@ if(REXGLUE_USE_VULKAN)
+     )
+ endif()
+ 
++# Experiment (dev only): optionally run the system SPIRV-Tools optimizer over translated shaders
++# (REX_NHL_SPIRV_OPT at run time). Built only when the static libraries are installed.
++find_library(NHL_SPIRV_TOOLS_OPT SPIRV-Tools-opt)
++find_library(NHL_SPIRV_TOOLS SPIRV-Tools)
++if(REXGLUE_USE_VULKAN AND NHL_SPIRV_TOOLS_OPT AND NHL_SPIRV_TOOLS)
++    target_link_libraries(rexgpu-xenos PRIVATE ${NHL_SPIRV_TOOLS_OPT} ${NHL_SPIRV_TOOLS})
++    target_compile_definitions(rexgpu-xenos PRIVATE REX_NHL_SPIRV_OPT=1)
++endif()
++
+ if(REXGLUE_USE_D3D12)
+     target_link_libraries(rexgpu-xenos PRIVATE
+         d3d12
+diff --git a/src/graphics/vulkan/shader.cpp b/src/graphics/vulkan/shader.cpp
+index c2805b2..6e28fba 100644
+--- a/src/graphics/vulkan/shader.cpp
++++ b/src/graphics/vulkan/shader.cpp
+@@ -1,3 +1,9 @@
++#include <chrono>
++#include <cstdlib>
++#include <vector>
++#ifdef REX_NHL_SPIRV_OPT
++#include <spirv-tools/optimizer.hpp>
++#endif
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -42,6 +48,30 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
+   shader_module_create_info.flags = 0;
+   shader_module_create_info.codeSize = translated_binary().size();
+   shader_module_create_info.pCode = reinterpret_cast<const uint32_t*>(translated_binary().data());
++#ifdef REX_NHL_SPIRV_OPT
++  // REX_NHL_SPIRV_OPT=O|Os: shrink the SPIR-V before the driver sees it (experiment, measured with
++  // the [nhl-pso] timings; the optimizer's own time is logged as [nhl-spvopt]).
++  std::vector<uint32_t> nhl_optimized;
++  if (const char* mode = std::getenv("REX_NHL_SPIRV_OPT"); mode && *mode) {
++    const auto start = std::chrono::steady_clock::now();
++    spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
++    opt.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char*) {});
++    if (mode[0] == 'O' && mode[1] == 's') {
++      opt.RegisterSizePasses();
++    } else {
++      opt.RegisterPerformancePasses();
++    }
++    const uint32_t* in = reinterpret_cast<const uint32_t*>(translated_binary().data());
++    if (opt.Run(in, translated_binary().size() / 4, &nhl_optimized) && !nhl_optimized.empty()) {
++      shader_module_create_info.codeSize = nhl_optimized.size() * 4;
++      shader_module_create_info.pCode = nhl_optimized.data();
++      REXGPU_INFO("[nhl-spvopt] {} -> {} bytes in {:.1f} ms", translated_binary().size(),
++                  nhl_optimized.size() * 4,
++                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
++                      .count());
++    }
++  }
++#endif
+   if (vulkan_device->functions().vkCreateShaderModule(vulkan_device->device(),
+                                                       &shader_module_create_info, nullptr,
+                                                       &shader_module_) != VK_SUCCESS) {
+-- 
+2.47.3
+

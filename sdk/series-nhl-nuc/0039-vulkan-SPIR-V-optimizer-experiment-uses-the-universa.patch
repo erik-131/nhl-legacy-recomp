@@ -1,0 +1,45 @@
+From 09dad274b550ddf4375d2563cf68058e4327cd74 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 20:23:55 +0100
+Subject: [PATCH 39/41] vulkan: SPIR-V optimizer experiment uses the universal
+ environment, logs failures
+
+---
+ src/graphics/vulkan/shader.cpp | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/vulkan/shader.cpp b/src/graphics/vulkan/shader.cpp
+index 6e28fba..1ba8ae1 100644
+--- a/src/graphics/vulkan/shader.cpp
++++ b/src/graphics/vulkan/shader.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include <chrono>
+ #include <cstdlib>
+ #include <vector>
+@@ -54,8 +55,11 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
+   std::vector<uint32_t> nhl_optimized;
+   if (const char* mode = std::getenv("REX_NHL_SPIRV_OPT"); mode && *mode) {
+     const auto start = std::chrono::steady_clock::now();
+-    spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
+-    opt.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char*) {});
++    spvtools::Optimizer opt(SPV_ENV_UNIVERSAL_1_5);
++    static std::atomic<int> nhl_msgs{0};
++    opt.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char* m) {
++      if (nhl_msgs.fetch_add(1) < 5) REXGPU_INFO("[nhl-spvopt] message: {}", m);
++    });
+     if (mode[0] == 'O' && mode[1] == 's') {
+       opt.RegisterSizePasses();
+     } else {
+@@ -69,6 +73,8 @@ VkShaderModule VulkanShader::VulkanTranslation::GetOrCreateShaderModule() {
+                   nhl_optimized.size() * 4,
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                       .count());
++    } else {
++      REXGPU_INFO("[nhl-spvopt] optimizer failed, using the original");
+     }
+   }
+ #endif
+-- 
+2.47.3
+

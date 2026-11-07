@@ -1,0 +1,31 @@
+From 515cc90330a5f5775a9844fe3b36293c3544771c Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Wed, 4 Nov 2026 23:11:31 +0100
+Subject: [PATCH 26/41] NHL fix: shared memory Usage::kComputeWrite uses
+ SHADER_WRITE access (was SHADER_READ)
+
+Resolve compute writes to shared memory were never made available by the barrier that follows them.
+Same fix as in the FH1 recomp's SDK patch set (mcla-recomp issue #48, patch 0005).
+---
+ src/graphics/vulkan/shared_memory.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index cab2c20..6419365 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -469,8 +469,10 @@ void VulkanSharedMemory::GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_
+                                        VkAccessFlags& access_mask) const {
+   switch (usage) {
+     case Usage::kComputeWrite:
++      // The writes of resolve compute shaders must be made available (src) and the next compute
++      // write ordered after earlier ones (dst) - SHADER_READ alone does neither.
+       stage_mask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+-      access_mask = VK_ACCESS_SHADER_READ_BIT;
++      access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+       return;
+     case Usage::kTransferDestination:
+       stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+-- 
+2.47.3
+

@@ -1,0 +1,33 @@
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -695,6 +695,19 @@
+   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
+   reader.set_read_offset(read_index * sizeof(uint32_t));
+   reader.set_write_offset(write_index * sizeof(uint32_t));
++  // NHL experiment: publish the ring-buffer read pointer as packets are consumed
++  // instead of only after the whole pending batch (WorkerThreadMain). Real
++  // hardware advances CP_RB_RPTR while fetching; the guest D3D runtime spin-waits
++  // on it (sub_827E2BC8), so batch-granular writeback makes it wait for the
++  // entire batch. Env-gated: REX_RPTR_INCREMENTAL=1.
++  static const bool rptr_incremental = [] {
++    const char* e = std::getenv("REX_RPTR_INCREMENTAL");
++    return e && *e && *e != '0';
++  }();
++  uint32_t* rptr_host = (rptr_incremental && read_ptr_writeback_ptr_)
++                            ? reinterpret_cast<uint32_t*>(
++                                  memory_->TranslatePhysical(read_ptr_writeback_ptr_))
++                            : nullptr;
+   do {
+     if (!ExecutePacket(&reader)) {
+       // This probably should be fatal - but we're going to continue anyways.
+@@ -702,6 +715,10 @@
+       assert_always();
+       break;
+     }
++    if (rptr_host) {
++      memory::store_and_swap<uint32_t>(rptr_host,
++                                       uint32_t(reader.read_offset() / sizeof(uint32_t)));
++    }
+   } while (reader.read_count());
+ 
+   OnPrimaryBufferEnd();

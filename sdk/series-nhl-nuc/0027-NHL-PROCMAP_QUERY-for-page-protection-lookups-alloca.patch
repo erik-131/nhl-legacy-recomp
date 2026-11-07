@@ -1,0 +1,275 @@
+From 0fa9e98e9365a815d7ca1ca6099a7fb698851803 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 13:26:23 +0100
+Subject: [PATCH 27/41] NHL: PROCMAP_QUERY for page protection lookups,
+ allocation-free /proc/self/maps fallback; type-0 register ranges in bulk,
+ known-register bitset
+
+---
+ src/core/memory_posix.cpp          | 124 +++++++++++++++++++++--------
+ src/graphics/command_processor.cpp |  30 ++++++-
+ 2 files changed, 121 insertions(+), 33 deletions(-)
+
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index 5240a54..09be0b7 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -9,11 +9,11 @@
+  * @modified    Tom Clay & Rien Gupta, 2026 - Adapted for ReXGlue runtime (POSIX + macOS)
+  */
+ 
++#include <atomic>
+ #include <cerrno>
+ #include <cstddef>
+ #include <cstdio>
+ #include <cstring>
+-#include <fstream>
+ #include <functional>
+ #include <string>
+ 
+@@ -29,12 +29,18 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/memory/utils.h>
+ #include <rex/platform.h>
+ #include <rex/string.h>
+ 
++#if REX_PLATFORM_LINUX
++#include <linux/fs.h>  // PROCMAP_QUERY, from Linux 6.11 headers
++#include <sys/ioctl.h>
++#endif
++
+ // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
+ // explicit *64 forms for legacy 32-bit off_t distributions.
+ #if defined(__APPLE__)
+@@ -57,6 +63,13 @@
+ // #include "xenia/base/main_android.h"
+ #endif
+ 
++#if REX_PLATFORM_LINUX
++REXCVAR_DEFINE_BOOL(nhl_procmap_query, true, "Memory",
++                    "Look up page protection with PROCMAP_QUERY (Linux 6.11+) instead of "
++                    "reading /proc/self/maps")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++#endif
++
+ namespace rex {
+ namespace memory {
+ 
+@@ -156,12 +169,42 @@ struct LinuxMapEntry {
+   char perms[5] = {};
+ };
+ 
+-// Parse a line from /proc/self/maps into a LinuxMapEntry
+-static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
++#ifdef PROCMAP_QUERY
++// PROCMAP_QUERY (Linux 6.11+): one VMA lookup without formatting and parsing the whole of
++// /proc/self/maps. Returns 1 found, 0 no mapping there, -1 not available on this kernel.
++static int QueryMapEntry(uintptr_t addr, LinuxMapEntry& out) {
++  static const int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
++  static std::atomic<bool> unsupported{maps_fd < 0};
++  if (unsupported.load(std::memory_order_relaxed)) {
++    return -1;
++  }
++  procmap_query q{};
++  q.size = sizeof(q);
++  q.query_addr = addr;
++  if (ioctl(maps_fd, PROCMAP_QUERY, &q) != 0) {
++    if (errno == ENOENT) {
++      return 0;
++    }
++    unsupported.store(true, std::memory_order_relaxed);
++    return -1;
++  }
++  out.start = static_cast<uintptr_t>(q.vma_start);
++  out.end = static_cast<uintptr_t>(q.vma_end);
++  out.perms[0] = (q.vma_flags & PROCMAP_QUERY_VMA_READABLE) ? 'r' : '-';
++  out.perms[1] = (q.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) ? 'w' : '-';
++  out.perms[2] = (q.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE) ? 'x' : '-';
++  out.perms[3] = (q.vma_flags & PROCMAP_QUERY_VMA_SHARED) ? 's' : 'p';
++  return 1;
++}
++#endif  // PROCMAP_QUERY
++
++// Parse "start-end perms ..." from a /proc/self/maps line. No allocation: this runs in the
++// access violation handler.
++static bool ParseProcMapsLine(const char* line, LinuxMapEntry& out) {
+   out = LinuxMapEntry{};
+   unsigned long long start = 0, end = 0;
+   char perms[5] = {};
+-  const int matched = std::sscanf(line.c_str(), "%llx-%llx %4s", &start, &end, perms);
++  const int matched = std::sscanf(line, "%llx-%llx %4s", &start, &end, perms);
+   if (matched < 3)
+     return false;
+   out.start = static_cast<uintptr_t>(start);
+@@ -170,23 +213,52 @@ static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
+   return out.start < out.end;
+ }
+ 
+-// Find the mapping entry in /proc/self/maps that contains the given address
++// Scan /proc/self/maps for the entry containing addr, stopping at the first one that does.
++static bool ScanMapsForAddress(uintptr_t addr, LinuxMapEntry& out_entry) {
++  const int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
++  if (fd < 0)
++    return false;
++  char buffer[8192];
++  size_t used = 0;
++  bool found = false;
++  while (!found) {
++    const ssize_t got = read(fd, buffer + used, sizeof(buffer) - 1 - used);
++    if (got <= 0)
++      break;
++    used += static_cast<size_t>(got);
++    buffer[used] = '\0';
++    char* line = buffer;
++    while (char* newline = std::strchr(line, '\n')) {
++      *newline = '\0';
++      LinuxMapEntry e;
++      if (ParseProcMapsLine(line, e) && addr >= e.start && addr < e.end) {
++        out_entry = e;
++        found = true;
++        break;
++      }
++      line = newline + 1;
++    }
++    if (!found) {
++      used = static_cast<size_t>(buffer + used - line);
++      std::memmove(buffer, line, used);
++    }
++  }
++  close(fd);
++  return found;
++}
++
++// Find the mapping that contains the given address
+ static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
+   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+-  std::ifstream maps("/proc/self/maps");
+-  if (!maps.is_open())
+-    return false;
+-  std::string line;
+-  while (std::getline(maps, line)) {
+-    LinuxMapEntry e;
+-    if (!ParseProcMapsLine(line, e))
+-      continue;
+-    if (addr >= e.start && addr < e.end) {
+-      out_entry = e;
+-      return true;
++#ifdef PROCMAP_QUERY
++  if (REXCVAR_GET(nhl_procmap_query)) {
++    const int result = QueryMapEntry(addr, out_entry);
++    if (result >= 0) {
++      return result != 0;
+     }
+   }
+-  return false;
++#endif
++  return ScanMapsForAddress(addr, out_entry);
+ }
+ 
+ // Check if [base, base+length) is fully covered by existing mappings (no gaps)
+@@ -200,25 +272,13 @@ static bool IsRangeFullyMapped(void* base_address, size_t length) {
+     return false;
+   }
+ 
+-  std::ifstream maps("/proc/self/maps");
+-  if (!maps.is_open())
+-    return false;
+-
+-  uintptr_t cursor = begin;
+-  std::string line;
+-  while (std::getline(maps, line)) {
++  for (uintptr_t cursor = begin; cursor < end;) {
+     LinuxMapEntry e;
+-    if (!ParseProcMapsLine(line, e))
+-      continue;
+-    if (e.end <= cursor)
+-      continue;
+-    if (e.start > cursor)
++    if (!FindEntryForAddress(reinterpret_cast<void*>(cursor), e))
+       return false;  // gap found
+     cursor = e.end;
+-    if (cursor >= end)
+-      return true;
+   }
+-  return cursor >= end;
++  return true;
+ }
+ 
+ // Convert /proc/self/maps permission chars to PageAccess
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 2b3ba94..509fb2a 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <string>
++#include <bitset>
+ #include <unordered_map>
+ #include <vector>
+ #include <ctime>
+@@ -43,6 +44,10 @@
+ 
+ REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
+ 
++REXCVAR_DEFINE_BOOL(nhl_type0_bulk, true, "GPU",
++                    "Write type-0 PM4 register ranges in bulk instead of one by one")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+                     "Refresh page-valid state from GPU-written memory at frame end. "
+                     "Disable for minor CPU overhead reduction, but may break memory coherency.")
+@@ -88,6 +93,23 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+ 
+ namespace rex::graphics {
+ 
++namespace {
++
++// RegisterFile::GetRegisterInfo is a switch over ~3400 registers, too slow to run on every write.
++const std::bitset<RegisterFile::kRegisterCount> kKnownRegisters = [] {
++  std::bitset<RegisterFile::kRegisterCount> known;
++  for (uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
++    known[i] = RegisterFile::GetRegisterInfo(i) != nullptr;
++  }
++  return known;
++}();
++
++bool IsKnownRegister(uint32_t index) {
++  return kKnownRegisters[index];
++}
++
++}  // namespace
++
+ using namespace rex::graphics::xenos;
+ 
+ namespace {
+@@ -557,7 +579,7 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+         break;
+     }
+   }
+-  if (!regs.GetRegisterInfo(index)) {
++  if (!IsKnownRegister(index)) {
+     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
+   }
+ 
+@@ -922,6 +944,12 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+ 
+   uint32_t base_index = (packet & 0x7FFF);
+   uint32_t write_one_reg = (packet >> 15) & 0x1;
++  // Constant ranges have a bulk path in WriteRegistersFromMem; the rest falls back to the same
++  // per-register loop.
++  if (!write_one_reg && REXCVAR_GET(nhl_type0_bulk)) {
++    WriteRegisterRangeFromRing(reader, base_index, count);
++    return true;
++  }
+   for (uint32_t m = 0; m < count; m++) {
+     uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
+     uint32_t target_index = write_one_reg ? base_index : base_index + m;
+-- 
+2.47.3
+

@@ -1,0 +1,69 @@
+From 3895a5de9033d97e7a9489a280fbc18853ed3b4d Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 13:38:17 +0100
+Subject: [PATCH 35/41] audio: [nhl-audio-stats] once a second, silence
+ inserted and callback gaps
+
+---
+ src/audio/sdl/sdl_audio_driver.cpp | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..fef33de 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -1,3 +1,5 @@
++#include <atomic>
++#include <chrono>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -175,6 +177,29 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     return;
+   }
+   // Snapshot once. A change mid-callback would split the frame across two mixes.
++  // [nhl-audio-stats] once a second: audio frames played, silence frames inserted because the
++  // queue was empty (an audible dropout), the longest gap between callbacks and the queue depth.
++  static std::atomic<uint32_t> nhl_played{0}, nhl_silent{0};
++  static std::atomic<int64_t> nhl_last_cb_us{0}, nhl_max_gap_us{0}, nhl_last_log_us{0};
++  {
++    const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++    const int64_t last = nhl_last_cb_us.exchange(now_us);
++    if (last && now_us - last > nhl_max_gap_us.load()) nhl_max_gap_us = now_us - last;
++    if (!nhl_last_log_us.load()) nhl_last_log_us = now_us;
++    if (now_us - nhl_last_log_us.load() >= 1000000) {
++      nhl_last_log_us = now_us;
++      size_t depth;
++      {
++        std::lock_guard<std::mutex> g(driver->frames_mutex_);
++        depth = driver->frames_queued_.size();
++      }
++      REXAPU_INFO("[nhl-audio-stats] played={} silent={} max_cb_gap={:.1f}ms queued={}",
++                  nhl_played.exchange(0), nhl_silent.exchange(0), nhl_max_gap_us.exchange(0) / 1000.0,
++                  depth);
++    }
++  }
+   const StereoFold fold = GetStereoFold();
+   const SurroundMix mix = GetSurroundMix();
+   const float gain = GetOutputGain();
+@@ -186,6 +211,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+         REXAPU_DEBUG("SDLCallback: no frames queued (silence)");
+         sdl_callback_count++;
+       }
++      ++nhl_silent;
+       std::memset(data, 0, len);
+       if (!SDL_PutAudioStreamData(stream, data, len)) {
+         REXAPU_ERROR("SDL_PutAudioStreamData() failed while filling silence: {}", SDL_GetError());
+@@ -195,6 +221,7 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+     } else {
+       auto buffer = driver->frames_queued_.front();
+       driver->frames_queued_.pop();
++      ++nhl_played;
+       if (REXCVAR_GET(audio_mute)) {
+         std::memset(data, 0, len);
+       } else {
+-- 
+2.47.3
+

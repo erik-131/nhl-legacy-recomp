@@ -1,0 +1,101 @@
+From 524efb1e952d97038029583e010ab405255b28f4 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 23:58:42 +0100
+Subject: [PATCH 31/41] NHL: no placeholder pipelines on the command thread,
+ draws using them are dropped anyway
+
+Cold storage, 2 runs each: all present gaps 6326, 5852 -> 5218, 4630 ms, worst in gameplay 486, 492 -> 322, 346 ms, 0 incomplete frames.
+---
+ src/graphics/vulkan/pipeline_cache.cpp | 38 +++++++++++++++++++++++---
+ 1 file changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index af718d8..5731ae9 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -49,6 +49,10 @@
+ #include <rex/types.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++REXCVAR_DEFINE_BOOL(nhl_async_no_placeholder, true, "GPU/Vulkan",
++                    "Don't compile placeholder pipelines for draws that are dropped anyway")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_INT32(
+     vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
+     "Number of pipeline creation threads for Vulkan async pipeline creation (-1 for auto)")
+@@ -1245,6 +1249,17 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   auto it = pipelines_.find(description);
+   if (it != pipelines_.end()) {
+     VkPipeline found_pipeline = it->second.pipeline.load(std::memory_order_acquire);
++    if (found_pipeline == VK_NULL_HANDLE &&
++        it->second.is_placeholder.load(std::memory_order_acquire)) {
++      // Still compiling and no placeholder was built: the draw is dropped by the caller.
++      last_pipeline_ = &*it;
++      pipeline_out = VK_NULL_HANDLE;
++      pipeline_layout_out = nullptr;
++      if (pipeline_handle_out) {
++        *pipeline_handle_out = &it->second;
++      }
++      return true;
++    }
+     if (found_pipeline == VK_NULL_HANDLE) {
+       PipelineCreationArguments creation_arguments;
+       if (!TryGetPipelineCreationArgumentsForDescription(description, &*it, creation_arguments) ||
+@@ -1277,8 +1292,18 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   if (use_async) {
+     creation_arguments_real.priority = async_priority;
+     PipelineCreationArguments creation_arguments_placeholder;
+-    if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
+-                                                      creation_arguments_placeholder, true)) {
++    if (REXCVAR_GET(nhl_async_no_placeholder)) {
++      // A draw using a placeholder is dropped anyway (IssueDraw), so don't compile one on this
++      // thread: ~230 per cold run, 2.5 s in total and up to 64 ms each, on top of the real pipelines.
++      pipeline.second.is_placeholder.store(true, std::memory_order_release);
++      {
++        std::lock_guard<std::mutex> lock(creation_request_lock_);
++        creation_queue_.push(creation_arguments_real);
++      }
++      creation_request_cond_.notify_one();
++      queued_async_creation = true;
++    } else if (TryGetPipelineCreationArgumentsForDescription(description, &pipeline,
++                                                             creation_arguments_placeholder, true)) {
+       pipeline.second.is_placeholder.store(true, std::memory_order_release);
+       if (EnsurePipelineCreated(creation_arguments_placeholder, placeholder_pixel_shader_)) {
+         {
+@@ -1319,6 +1344,9 @@ bool VulkanPipelineCache::ConfigurePipeline(
+   if (pipeline_handle_out) {
+     *pipeline_handle_out = &pipeline.second;
+   }
++  if (pipeline_out == VK_NULL_HANDLE && pipeline.second.is_placeholder.load(std::memory_order_acquire)) {
++    return true;
++  }
+   return pipeline_out != VK_NULL_HANDLE && pipeline_layout_out != nullptr;
+ }
+ 
+@@ -1342,11 +1370,12 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+     return;
+   }
+   const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
+-  pipeline_out = pipeline->pipeline.load(std::memory_order_acquire);
+-  pipeline_layout_out = pipeline->pipeline_layout.load(std::memory_order_acquire);
++  // The flag first: creation stores the pipeline before clearing it, so false means both are there.
+   if (is_placeholder_out) {
+     *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
+   }
++  pipeline_out = pipeline->pipeline.load(std::memory_order_acquire);
++  pipeline_layout_out = pipeline->pipeline_layout.load(std::memory_order_acquire);
+ }
+ 
+ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
+@@ -3684,6 +3713,7 @@ void VulkanPipelineCache::CreationThread(size_t thread_index) {
+         // Keep the placeholder resident and stop waiting for a real pipeline.
+         creation_arguments.pipeline->second.is_placeholder.store(false, std::memory_order_release);
+       } else {
++        creation_arguments.pipeline->second.is_placeholder.store(false, std::memory_order_release);
+         creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
+                                                            std::memory_order_release);
+       }
+-- 
+2.47.3
+

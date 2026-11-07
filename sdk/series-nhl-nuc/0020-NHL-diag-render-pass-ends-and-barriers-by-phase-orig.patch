@@ -1,0 +1,133 @@
+From 1a9492789582e000a9db3fc3e475000d8abfa3ea Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 03:39:23 +0100
+Subject: [PATCH 20/41] NHL diag: render-pass ends and barriers by phase/origin
+ ([nhl-rpends], [nhl-barriers])
+
+---
+ .../rex/graphics/vulkan/command_processor.h   | 12 +++++++
+ src/graphics/vulkan/command_processor.cpp     | 36 +++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 03bfcd3..a37ca2b 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -466,6 +466,18 @@ class VulkanCommandProcessor : public CommandProcessor {
+   double nhl_gpu_ns_per_tick_ = 0.0;
+   uint64_t nhl_gpu_cat_ticks_[kNhlGpuCatCount] = {};
+   uint64_t nhl_gpu_cat_marks_[kNhlGpuCatCount] = {};
++  // NHL diag (REX_CMD_STATS): what the command processor was doing (NhlGpuCat phase, set by
++  // NhlGpuMark even with the GPU profiler off) when a render pass ended or barriers were
++  // submitted. [kNhlGpuCatCount] = render pass ended because the framebuffer changed.
++  uint32_t nhl_phase_ = kNhlGpuOther;
++  uint64_t nhl_pass_ends_by_phase_[kNhlGpuCatCount + 1] = {};
++  uint64_t nhl_barrier_cmds_by_phase_[kNhlGpuCatCount] = {};
++  uint64_t nhl_buffer_barriers_by_phase_[kNhlGpuCatCount] = {};
++  uint64_t nhl_image_barriers_by_phase_[kNhlGpuCatCount] = {};
++  // Barriers pushed (queued) per phase - where they originate; they are often submitted later,
++  // at the next draw's render pass entry.
++  uint64_t nhl_buffer_pushed_by_phase_[kNhlGpuCatCount] = {};
++  uint64_t nhl_image_pushed_by_phase_[kNhlGpuCatCount] = {};
+   uint64_t nhl_gpu_busy_ticks_ = 0;
+   uint64_t nhl_gpu_last_end_tick_ = 0;
+   uint64_t nhl_gpu_idle_ticks_ = 0;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 241b588..4b96f54 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2359,6 +2359,33 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+       REXGPU_INFO("[nhl-cmdstats] per frame: render_passes={:.1f} pipeline_binds={:.1f} barriers={:.1f}",
+                   double(cur[0] - last[0]) / frames, double(cur[1] - last[1]) / frames,
+                   double(cur[2] - last[2]) / frames);
++      // Why render passes end / barriers are submitted, by command-processor phase.
++      static const char* kPhase[kNhlGpuCatCount] = {"other",  "prep", "tex",     "rt",
++                                                    "upload", "draw", "resolve", "swap"};
++      std::string ends, bars;
++      for (uint32_t i = 0; i < kNhlGpuCatCount; ++i) {
++        ends += fmt::format(" {}={:.1f}", kPhase[i], double(nhl_pass_ends_by_phase_[i]) / frames);
++        bars += fmt::format(" {}={:.1f}/{:.1f}b/{:.1f}i", kPhase[i],
++                            double(nhl_barrier_cmds_by_phase_[i]) / frames,
++                            double(nhl_buffer_barriers_by_phase_[i]) / frames,
++                            double(nhl_image_barriers_by_phase_[i]) / frames);
++      }
++      REXGPU_INFO("[nhl-rpends] per frame:{} fb_switch={:.1f}", ends,
++                  double(nhl_pass_ends_by_phase_[kNhlGpuCatCount]) / frames);
++      std::string pushed;
++      for (uint32_t i = 0; i < kNhlGpuCatCount; ++i) {
++        pushed += fmt::format(" {}={:.1f}b/{:.1f}i", kPhase[i],
++                              double(nhl_buffer_pushed_by_phase_[i]) / frames,
++                              double(nhl_image_pushed_by_phase_[i]) / frames);
++      }
++      REXGPU_INFO("[nhl-barriers] submitted per frame (cmds/buffer/image):{}", bars);
++      REXGPU_INFO("[nhl-barriers] pushed per frame by origin (buffer/image):{}", pushed);
++      std::memset(nhl_buffer_pushed_by_phase_, 0, sizeof(nhl_buffer_pushed_by_phase_));
++      std::memset(nhl_image_pushed_by_phase_, 0, sizeof(nhl_image_pushed_by_phase_));
++      std::memset(nhl_pass_ends_by_phase_, 0, sizeof(nhl_pass_ends_by_phase_));
++      std::memset(nhl_barrier_cmds_by_phase_, 0, sizeof(nhl_barrier_cmds_by_phase_));
++      std::memset(nhl_buffer_barriers_by_phase_, 0, sizeof(nhl_buffer_barriers_by_phase_));
++      std::memset(nhl_image_barriers_by_phase_, 0, sizeof(nhl_image_barriers_by_phase_));
+       std::memcpy(last, cur, sizeof(last));
+       frames = 0;
+       t0 = now;
+@@ -3014,6 +3041,7 @@ bool VulkanCommandProcessor::PushBufferMemoryBarrier(
+       src_queue_family_index == dst_queue_family_index) {
+     return false;
+   }
++  ++nhl_buffer_pushed_by_phase_[nhl_phase_];
+ 
+   // Separate different barriers for overlapping buffer ranges into different
+   // pipeline barrier commands.
+@@ -3065,6 +3093,7 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+       old_layout == new_layout && src_queue_family_index == dst_queue_family_index) {
+     return false;
+   }
++  ++nhl_image_pushed_by_phase_[nhl_phase_];
+ 
+   // Separate different barriers for overlapping image subresource ranges into
+   // different pipeline barrier commands.
+@@ -3137,6 +3166,9 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+     return false;
+   }
+   EndRenderPass();
++  nhl_barrier_cmds_by_phase_[nhl_phase_] += pending_barriers_.size();
++  nhl_buffer_barriers_by_phase_[nhl_phase_] += pending_barriers_buffer_memory_barriers_.size();
++  nhl_image_barriers_by_phase_[nhl_phase_] += pending_barriers_image_memory_barriers_.size();
+   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
+     auto it_next = std::next(it);
+     bool is_last = it_next == pending_barriers_.cend();
+@@ -3183,6 +3215,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   }
+ 
+   if (in_render_pass_) {
++    ++nhl_pass_ends_by_phase_[kNhlGpuCatCount];
+     if (use_dynamic_rendering) {
+       deferred_command_buffer_.CmdVkEndRendering();
+     } else {
+@@ -3257,6 +3290,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   }
+ 
+   if (in_render_pass_) {
++    ++nhl_pass_ends_by_phase_[kNhlGpuCatCount];
+     if (use_dynamic_rendering) {
+       deferred_command_buffer_.CmdVkEndRendering();
+     } else {
+@@ -3449,6 +3483,7 @@ void VulkanCommandProcessor::EndRenderPass() {
+   if (!in_render_pass_) {
+     return;
+   }
++  ++nhl_pass_ends_by_phase_[nhl_phase_];
+   if (current_render_pass_ == VK_NULL_HANDLE) {
+     deferred_command_buffer_.CmdVkEndRendering();
+   } else {
+@@ -5715,6 +5750,7 @@ uint64_t NhlGpuNowNs() {
+ }  // namespace
+ 
+ void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
++  nhl_phase_ = cat;
+   if (!NhlGpuProfEnabled() || !submission_open_ || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
+   static const bool by_shader = std::getenv("REX_GPU_PROF_SHADERS") != nullptr;
+   const uint64_t tag = (by_shader && cat == kNhlGpuDraw) ? nhl_gpu_draw_tag_ : 0;
+-- 
+2.47.3
+

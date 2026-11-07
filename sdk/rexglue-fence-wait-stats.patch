@@ -1,0 +1,69 @@
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index c4dd1b7..2d94c62 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -421,6 +421,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // the submission to await to simply check status, or pass
+   // GetCurrentSubmission() to wait for all queue operations to be completed.
+   void CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission);
++  // NHL diag: set while BeginSubmission awaits a frame slot (REX_FENCE_WAIT_STATS).
++  bool nhl_fence_wait_is_frame_ = false;
+   // If is_guest_command is true, a new full frame - with full cleanup of
+   // resources and, if needed, starting capturing - is opened if pending (as
+   // opposed to simply resuming after mid-frame synchronization). Returns
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index fb72901..52afef2 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -5356,9 +5356,41 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+     // defined by vkQueueSubmit additionally include in the first
+     // synchronization scope all commands that occur earlier in submission
+     // order."
++    // NHL diag (REX_FENCE_WAIT_STATS=1): time the CP thread spends blocked on
++    // GPU fences, split into frame-pacing waits (frames in flight full => GPU is
++    // the bottleneck) and all other waits (readback drains, resource reuse).
++    static const bool fence_stats = [] {
++      const char* e = std::getenv("REX_FENCE_WAIT_STATS");
++      return e && *e && *e != '0';
++    }();
++    const auto wait_t0 = fence_stats ? std::chrono::steady_clock::now()
++                                     : std::chrono::steady_clock::time_point();
+     VkResult wait_result =
+         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
++    if (fence_stats) {
++      static uint64_t ns_frame = 0, ns_other = 0, n_frame = 0, n_other = 0;
++      static auto window_start = std::chrono::steady_clock::now();
++      const auto now = std::chrono::steady_clock::now();
++      const uint64_t ns =
++          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - wait_t0).count());
++      if (nhl_fence_wait_is_frame_) {
++        ns_frame += ns;
++        ++n_frame;
++      } else {
++        ns_other += ns;
++        ++n_other;
++      }
++      const double window_s = std::chrono::duration<double>(now - window_start).count();
++      if (window_s >= 1.0) {
++        REXGPU_INFO("[nhl-fencewait] window={:.2f}s frame_waits={} ({:.1f} ms) other_waits={} "
++                    "({:.1f} ms) blocked={:.0f}%",
++                    window_s, n_frame, ns_frame / 1e6, n_other, ns_other / 1e6,
++                    100.0 * (ns_frame + ns_other) / (window_s * 1e9));
++        ns_frame = ns_other = n_frame = n_other = 0;
++        window_start = now;
++      }
++    }
+     if (wait_result == VK_SUCCESS) {
+       fences_awaited += await_submission - submission_completed_;
+     } else {
+@@ -5497,7 +5529,9 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   // is still available, and whether the await was successful.
+   uint64_t await_submission =
+       is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
++  nhl_fence_wait_is_frame_ = is_opening_frame;
+   CheckSubmissionFenceAndDeviceLoss(await_submission);
++  nhl_fence_wait_is_frame_ = false;
+   if (device_lost_ || submission_completed_ < await_submission) {
+     return false;
+   }

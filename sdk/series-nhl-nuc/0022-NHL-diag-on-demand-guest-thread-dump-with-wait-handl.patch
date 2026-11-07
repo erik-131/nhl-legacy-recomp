@@ -1,0 +1,159 @@
+From c0568805e6c55798ad1227545ab023cd9e141115 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 05:04:23 +0100
+Subject: [PATCH 22/41] NHL diag: on-demand guest thread dump with wait handles
+ + guest call chains (NHL_STALL_DUMP_FILE)
+
+---
+ include/rex/system/kernel_state.h |  2 ++
+ include/rex/system/xthread.h      |  4 +++
+ src/system/kernel_state.cpp       | 50 +++++++++++++++++++++++++++++++
+ src/system/xobject.cpp            | 21 +++++++++++++
+ 4 files changed, 77 insertions(+)
+
+diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
+index be820b5..142fb32 100644
+--- a/include/rex/system/kernel_state.h
++++ b/include/rex/system/kernel_state.h
+@@ -191,6 +191,8 @@ class KernelState {
+   Runtime* emulator() const { return emulator_; }
+   memory::Memory* memory() const { return memory_; }
+   runtime::FunctionDispatcher* function_dispatcher() const { return function_dispatcher_; }
++  // NHL diag: log every thread's wait object and guest back-chain ([nhl-stall]).
++  void NhlDumpThreads();
+   rex::filesystem::VirtualFileSystem* file_system() const { return file_system_; }
+ 
+   uint32_t title_id() const;
+diff --git a/include/rex/system/xthread.h b/include/rex/system/xthread.h
+index a72911e..1962ed0 100644
+--- a/include/rex/system/xthread.h
++++ b/include/rex/system/xthread.h
+@@ -333,6 +333,10 @@ class XThread : public XObject {
+   bool is_running() const { return running_; }
+ 
+   uint32_t thread_id() const { return thread_id_; }
++  // NHL diag (NHL_STALL_DUMP_FILE): what this guest thread is blocked on right now.
++  std::atomic<uint32_t> nhl_wait_handle{0};  // first handle of the wait (0 = not waiting)
++  std::atomic<uint32_t> nhl_wait_type{0};    // XObject::Type of that object
++  std::atomic<uint32_t> nhl_wait_count{0};   // handles in the wait (WaitMultiple)
+   uint32_t last_error();
+   void set_last_error(uint32_t error_code);
+   void set_name(const std::string_view name);
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 22cfb97..dfaf201 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -38,6 +38,7 @@
+ #include <rex/system/xmodule.h>
+ #include <rex/system/xmutant.h>
+ #include <rex/system/xnotifylistener.h>
++#include <cstdlib>
+ #include <rex/system/xobject.h>
+ #include <rex/system/xsemaphore.h>
+ #include <rex/system/xthread.h>
+@@ -678,6 +679,20 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
+       return 0;
+     }));
+     dispatch_thread_->set_name("Kernel Dispatch");
++    // NHL diag: NHL_STALL_DUMP_FILE=<path> - when that file appears, dump all threads once
++    // and delete it (the bench watchdog touches it on a boot stall).
++    if (const char* dump_file = std::getenv("NHL_STALL_DUMP_FILE"); dump_file && *dump_file) {
++      std::thread([this, path = std::string(dump_file)]() {
++        for (;;) {
++          std::this_thread::sleep_for(std::chrono::seconds(1));
++          std::error_code ec;
++          if (std::filesystem::exists(path, ec)) {
++            NhlDumpThreads();
++            std::filesystem::remove(path, ec);
++          }
++        }
++      }).detach();
++    }
+     X_STATUS create_status = dispatch_thread_->Create();
+     if (XFAILED(create_status)) {
+       dispatch_thread_running_ = false;
+@@ -689,6 +704,41 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
+   LoadAchievementsData();
+ }
+ 
++void KernelState::NhlDumpThreads() {
++  auto global_lock = global_critical_region_.Acquire();
++  REXSYS_INFO("[nhl-stall] ---- {} threads ----", threads_by_id_.size());
++  for (auto& [id, thread] : threads_by_id_) {
++    if (!thread->is_guest_thread()) {
++      continue;
++    }
++    const uint32_t wait_handle = thread->nhl_wait_handle;
++    std::string chain;
++    if (auto* ts = thread->thread_state()) {
++      // Guest stack back-chain: 0(sp) = caller's sp; this codegen saves LR at caller_sp - 8.
++      uint32_t sp = ts->context()->r1.u32;
++      chain = fmt::format("lr={:08X} sp={:08X}:", uint32_t(ts->context()->lr), sp);
++      for (int i = 0; i < 24 && sp; ++i) {
++        const uint32_t back = memory_->TranslateVirtual<rex::be<uint32_t>*>(sp)[0];
++        if (!back || back <= sp || back - sp > 0x100000) {
++          break;
++        }
++        chain += fmt::format(" {:08X}",
++                             uint32_t(memory_->TranslateVirtual<rex::be<uint32_t>*>(back - 8)[0]));
++        sp = back;
++      }
++    }
++    std::string wait = "running/sleeping";
++    if (wait_handle) {
++      auto obj = object_table()->LookupObject<XObject>(wait_handle);
++      wait = fmt::format("wait handle={:08X} type={} count={} name='{}'", wait_handle,
++                         uint32_t(thread->nhl_wait_type), uint32_t(thread->nhl_wait_count),
++                         obj ? obj->name() : std::string("?"));
++    }
++    REXSYS_INFO("[nhl-stall] tid={} '{}' {} | {}", thread->thread_id(), thread->name(), wait,
++                chain);
++  }
++}
++
+ void KernelState::LoadKernelModule(object_ref<KernelModule> kernel_module) {
+   auto global_lock = global_critical_region_.Acquire();
+   kernel_modules_.push_back(std::move(kernel_module));
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index d358f39..b508ff6 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -213,7 +213,16 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+                                 : std::chrono::milliseconds::max();
+ 
+   XThread::CheckTitleTermination();
++  XThread* nhl_self = XThread::GetCurrentThread();
++  if (nhl_self) {
++    nhl_self->nhl_wait_type = uint32_t(type());
++    nhl_self->nhl_wait_count = 1;
++    nhl_self->nhl_wait_handle = handle();
++  }
+   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
++  if (nhl_self) {
++    nhl_self->nhl_wait_handle = 0;
++  }
+   XThread::CheckTitleTermination();
+   switch (result) {
+     case rex::thread::WaitResult::kSuccess:
+@@ -273,6 +282,18 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+                                 : std::chrono::milliseconds::max();
+ 
+   XThread::CheckTitleTermination();
++  // NHL diag: record the wait for NHL_STALL_DUMP_FILE; cleared on every return path.
++  struct NhlWaitScope {
++    XThread* t;
++    ~NhlWaitScope() {
++      if (t) t->nhl_wait_handle = 0;
++    }
++  } nhl_wait_scope{XThread::GetCurrentThread()};
++  if (nhl_wait_scope.t && count) {
++    nhl_wait_scope.t->nhl_wait_type = uint32_t(objects[0]->type());
++    nhl_wait_scope.t->nhl_wait_count = count;
++    nhl_wait_scope.t->nhl_wait_handle = objects[0]->handle();
++  }
+   if (wait_type) {
+     auto result =
+         rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
+-- 
+2.47.3
+

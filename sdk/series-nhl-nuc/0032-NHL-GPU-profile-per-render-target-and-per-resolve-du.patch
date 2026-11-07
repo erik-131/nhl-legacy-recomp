@@ -1,0 +1,408 @@
+From 648d9f780fef8d22c6e2469717d2407162eb3ddd Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 04:05:53 +0100
+Subject: [PATCH 32/41] NHL: GPU profile per render target and per resolve
+ (dump and copy); test switches for half pixels, fast vertex math and dumping
+ one sample
+
+All off by default. Half pixels: main pass 5.2 -> 3.8 ms. Fast vertex math: 2-4 % fewer draw cycles at most. One-sample dump: 3.12 -> 2.66 ms in scenes with 4x shadow resolves, nothing elsewhere; validated by poisoning the skipped samples (clean) and keeping the wrong one (depth of field breaks).
+---
+ .../pipeline/shader/spirv_translator.h        |  2 +
+ .../rex/graphics/vulkan/command_processor.h   |  6 ++
+ .../rex/graphics/vulkan/render_target_cache.h |  7 ++
+ .../pipeline/shader/spirv_translator.cpp      |  1 +
+ .../pipeline/shader/spirv_translator_alu.cpp  | 30 +++++++-
+ src/graphics/vulkan/command_processor.cpp     | 62 ++++++++++++---
+ src/graphics/vulkan/render_target_cache.cpp   | 77 +++++++++++++++++++
+ 7 files changed, 175 insertions(+), 10 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 5753019..0ba9345 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -655,6 +655,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // For Shader Model 3 multiplication (+-0 or denormal * anything = +0),
+   // replaces the value with +0 if the minimum of the two operands is 0. This
+   // must be called with absolute values of operands - use GetAbsoluteOperand!
++  bool NhlSkipMultiplyZeroCheck() const;
++  bool nhl_infinity_source_seen_ = false;
+   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs, spv::Id operand_1_abs);
+   // Conditionally discard the current fragment. Changes the build point.
+   void KillPixel(spv::Id condition, uint8_t memexport_eM_potentially_written_before);
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index a37ca2b..c130518 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -434,9 +434,12 @@ class VulkanCommandProcessor : public CommandProcessor {
+     kNhlGpuDraw,
+     kNhlGpuResolve,
+     kNhlGpuSwap,
++    kNhlGpuDump,
+     kNhlGpuCatCount
+   };
+   void NhlGpuMark(uint32_t cat);
++  // Describes the resolve being recorded, for [nhl-gpuresolve].
++  void NhlGpuSetResolveTag(uint64_t tag) { nhl_gpu_resolve_tag_ = tag; }
+ 
+  private:
+   void NhlGpuProfOnBeginSubmission();
+@@ -462,6 +465,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+   std::vector<uint64_t> nhl_gpu_tags_;
+   uint64_t nhl_gpu_cur_tag_ = 0;
+   uint64_t nhl_gpu_draw_tag_ = 0;
++  uint64_t nhl_draw_vertices_ = 0;
++  uint64_t nhl_gpu_resolve_tag_ = 0;
++  std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> nhl_gpu_resolve_ticks_;
+   std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> nhl_gpu_tag_ticks_;  // ticks, segs
+   double nhl_gpu_ns_per_tick_ = 0.0;
+   uint64_t nhl_gpu_cat_ticks_[kNhlGpuCatCount] = {};
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index d2bebb7..e6e5cc3 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -662,6 +662,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+     }
+   };
+ 
++  // Set around DumpRenderTargets by Resolve: 0 all samples, or DumpPipelineKey::nhl_only_sample for
++  // render targets with nhl_dump_only_sample_msaa_ samples.
++  uint32_t nhl_dump_only_sample_ = 0;
++  xenos::MsaaSamples nhl_dump_only_sample_msaa_ = xenos::MsaaSamples::k1X;
++
+   union DumpPipelineKey {
+     uint32_t key;
+     struct {
+@@ -670,6 +675,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+       // Last bit because this affects the pipeline - after sorting, only change
+       // it at most once. Depth buffers have an additional stencil SRV.
+       uint32_t is_depth : 1;
++      // 0: all samples. Otherwise 1 + the only sample a fast resolve copy reads, as bits x (1), y (2).
++      uint32_t nhl_only_sample : 3;
+     };
+ 
+     DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index d5f3eff..5f106de 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -183,6 +183,7 @@ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+ }
+ 
+ void SpirvShaderTranslator::StartTranslation() {
++  nhl_infinity_source_seen_ = false;
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index b83ee36..3031e63 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -17,13 +17,27 @@
+ #include <SPIRV/GLSL.std.450.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(nhl_fast_vertex_math, false, "GPU",
++                    "Vertex shaders: no 0 * x check where x can't be infinite or NaN");
++
+ namespace rex::graphics {
+ 
++// In a vertex shader without rcp, rsq or log so far, nothing can be infinite or NaN unless the
++// constants or vertex data are, and then 0 * x is 0 anyway, so the Shader Model 3 check is dropped: it
++// costs several instructions per product, and NHL's skinning shaders have hundreds of products per vertex.
++bool SpirvShaderTranslator::NhlSkipMultiplyZeroCheck() const {
++  return is_vertex_shader() && !nhl_infinity_source_seen_ && REXCVAR_GET(nhl_fast_vertex_math);
++}
++
+ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
+                                                       spv::Id operand_1_abs) {
++  if (NhlSkipMultiplyZeroCheck()) {
++    return value;
++  }
+   EnsureBuildPointAvailable();
+   int num_components = builder_->getNumComponents(value);
+   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
+@@ -192,7 +206,7 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+       uint32_t multiplicands_different =
+           used_result_components &
+           ~instr.vector_operands[0].GetIdenticalComponents(instr.vector_operands[1]);
+-      if (multiplicands_different) {
++      if (multiplicands_different && !NhlSkipMultiplyZeroCheck()) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         spv::Id different_operands[2] = {multiplicands[0], multiplicands[1]};
+         spv::Id different_result = result;
+@@ -832,6 +846,20 @@ spv::Id SpirvShaderTranslator::ProcessScalarAluOperation(
+     const ParsedAluInstruction& instr, uint8_t memexport_eM_potentially_written_before,
+     bool& predicate_written) {
+   predicate_written = false;
++  switch (instr.scalar_opcode) {
++    case ucode::AluScalarOpcode::kRcp:
++    case ucode::AluScalarOpcode::kRcpc:
++    case ucode::AluScalarOpcode::kRcpf:
++    case ucode::AluScalarOpcode::kRsq:
++    case ucode::AluScalarOpcode::kRsqc:
++    case ucode::AluScalarOpcode::kRsqf:
++    case ucode::AluScalarOpcode::kLog:
++    case ucode::AluScalarOpcode::kLogc:
++      nhl_infinity_source_seen_ = true;
++      break;
++    default:
++      break;
++  }
+ 
+   spv::Id operand_storage[2] = {};
+   for (uint32_t i = 0; i < instr.scalar_operand_count; ++i) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 196589e..7209c46 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -54,6 +54,9 @@
+ #include <rex/ui/vulkan/util.h>
+ 
+ // Legacy backend compatibility aliases for shared readback controls.
++REXCVAR_DEFINE_BOOL(nhl_test_half_scissor, false, "GPU/Vulkan",
++                    "Measurement only: draw half the pixels, to tell pixel from vertex cost")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -2356,12 +2359,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     if (now - t0 >= std::chrono::seconds(1)) {
+       uint64_t cur[3];
+       for (int i = 0; i < 3; ++i) cur[i] = DeferredCommandBuffer::nhl_stats_[i].load();
+-      REXGPU_INFO("[nhl-cmdstats] per frame: render_passes={:.1f} pipeline_binds={:.1f} barriers={:.1f}",
++      REXGPU_INFO("[nhl-cmdstats] per frame: render_passes={:.1f} pipeline_binds={:.1f} barriers={:.1f} vertices={:.0f}",
+                   double(cur[0] - last[0]) / frames, double(cur[1] - last[1]) / frames,
+-                  double(cur[2] - last[2]) / frames);
++                  double(cur[2] - last[2]) / frames, double(nhl_draw_vertices_) / frames);
++      nhl_draw_vertices_ = 0;
+       // Why render passes end / barriers are submitted, by command-processor phase.
+       static const char* kPhase[kNhlGpuCatCount] = {"other",  "prep", "tex",     "rt",
+-                                                    "upload", "draw", "resolve", "swap"};
++                                                    "upload", "draw", "resolve", "swap", "dump"};
+       std::string ends, bars;
+       for (uint32_t i = 0; i < kNhlGpuCatCount; ++i) {
+         ends += fmt::format(" {}={:.1f}", kPhase[i], double(nhl_pass_ends_by_phase_[i]) / frames);
+@@ -3805,7 +3809,11 @@ void VulkanCommandProcessor::SetViewport(const VkViewport& viewport) {
+   }
+ }
+ 
+-void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
++void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor_in) {
++  VkRect2D scissor = scissor_in;
++  if (REXCVAR_GET(nhl_test_half_scissor)) {
++    scissor.extent.height /= 2;
++  }
+   if (!dynamic_scissor_update_needed_) {
+     dynamic_scissor_update_needed_ |= dynamic_scissor_.offset.x != scissor.offset.x;
+     dynamic_scissor_update_needed_ |= dynamic_scissor_.offset.y != scissor.offset.y;
+@@ -4513,8 +4521,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     ++run;
+   }
+   // VS/PS pair for [nhl-gpushader]; the PS hash is rotated so a pair's tag stays unique.
+-  nhl_gpu_draw_tag_ = vertex_shader->ucode_data_hash() ^
+-                      (pixel_shader ? std::rotl(pixel_shader->ucode_data_hash(), 17) : 0) ^ 1;
++  nhl_draw_vertices_ += primitive_processing_result.host_draw_vertex_count;
++  static const bool nhl_gpu_tag_surfaces = [] {
++    const char* e = std::getenv("REX_GPU_PROF_SHADERS");
++    return e && *e == '2';
++  }();
++  if (nhl_gpu_tag_surfaces) {
++    // REX_GPU_PROF_SHADERS=2: by render target rather than shader pair. Fields, low to high: pitch 14,
++    // samples log2 2, depth base 12, color base 12, z write 1, color written 1.
++    const auto nhl_surface = regs.Get<reg::RB_SURFACE_INFO>();
++    const auto nhl_depth = regs.Get<reg::RB_DEPTH_INFO>();
++    const auto nhl_color = regs.Get<reg::RB_COLOR_INFO>();
++    nhl_gpu_draw_tag_ = uint64_t(nhl_surface.surface_pitch & 0x3FFF) |
++                        (uint64_t(nhl_surface.msaa_samples) << 14) |
++                        (uint64_t(nhl_depth.depth_base & 0xFFF) << 16) |
++                        (uint64_t(nhl_color.color_base & 0xFFF) << 28) |
++                        (uint64_t(normalized_depth_control.z_write_enable) << 40) |
++                        (uint64_t(normalized_color_mask != 0) << 41) | (uint64_t(1) << 42);
++  } else {
++    nhl_gpu_draw_tag_ = vertex_shader->ucode_data_hash() ^
++                        (pixel_shader ? std::rotl(pixel_shader->ucode_data_hash(), 17) : 0) ^ 1;
++  }
+   NhlGpuMark(kNhlGpuDraw);
+   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+       render_target_cache_->last_update_render_pass(),
+@@ -5771,7 +5798,9 @@ void VulkanCommandProcessor::NhlGpuMark(uint32_t cat) {
+   nhl_phase_ = cat;
+   if (!NhlGpuProfEnabled() || !submission_open_ || nhl_gpu_pool_ == VK_NULL_HANDLE) return;
+   static const bool by_shader = std::getenv("REX_GPU_PROF_SHADERS") != nullptr;
+-  const uint64_t tag = (by_shader && cat == kNhlGpuDraw) ? nhl_gpu_draw_tag_ : 0;
++  const uint64_t tag = (cat == kNhlGpuResolve || cat == kNhlGpuDump)
++                           ? nhl_gpu_resolve_tag_
++                           : ((by_shader && cat == kNhlGpuDraw) ? nhl_gpu_draw_tag_ : 0);
+   if (cat == nhl_gpu_cur_cat_ && tag == nhl_gpu_cur_tag_) return;
+   if (nhl_gpu_count_ >= kNhlGpuQueries - 1) {
+     ++nhl_gpu_overflow_;
+@@ -5863,7 +5892,11 @@ void VulkanCommandProcessor::NhlGpuProfPoll() {
+         const uint8_t cat = i < p.cats.size() ? p.cats[i] : uint8_t(kNhlGpuOther);
+         if (ts[i + 1] > ts[i]) {
+           nhl_gpu_cat_ticks_[cat] += ts[i + 1] - ts[i];
+-          if (i < p.tags.size() && p.tags[i]) {
++          if (i < p.tags.size() && p.tags[i] && (cat == kNhlGpuResolve || cat == kNhlGpuDump)) {
++            auto& e = nhl_gpu_resolve_ticks_[p.tags[i] | (uint64_t(cat == kNhlGpuDump) << 63)];
++            e.first += ts[i + 1] - ts[i];
++            ++e.second;
++          } else if (i < p.tags.size() && p.tags[i]) {
+             auto& e = nhl_gpu_tag_ticks_[p.tags[i]];
+             e.first += ts[i + 1] - ts[i];
+             ++e.second;
+@@ -5886,7 +5919,7 @@ void VulkanCommandProcessor::NhlGpuProfPoll() {
+   if (!nhl_gpu_window_start_ns_) nhl_gpu_window_start_ns_ = now;
+   if (now - nhl_gpu_window_start_ns_ >= 1000000000ull) {
+     static const char* kNames[kNhlGpuCatCount] = {"other",  "prep", "tex",     "rt",
+-                                                  "upload", "draw", "resolve", "swap"};
++                                                  "upload", "draw", "resolve", "swap", "dump"};
+     const double w = (now - nhl_gpu_window_start_ns_) / 1e6;
+     const double k = nhl_gpu_ns_per_tick_ / 1e6;
+     std::string out;
+@@ -5898,6 +5931,17 @@ void VulkanCommandProcessor::NhlGpuProfPoll() {
+                 "overflow={}{}",
+                 w, nhl_gpu_busy_ticks_ * k, nhl_gpu_idle_ticks_ * k, nhl_gpu_submissions_,
+                 nhl_gpu_overflow_, out);
++    if (!nhl_gpu_resolve_ticks_.empty()) {
++      std::string res;
++      for (const auto& [t, e] : nhl_gpu_resolve_ticks_) {
++        // Bit 63 dump; then copy shader, source samples log2, depth, rows, row length in tiles.
++        res += fmt::format(" {}:s{}:m{}:d{}:{}x{}:{:.2f}ms/{}", (t >> 63) ? "dump" : "copy",
++                           (t >> 32) & 0xFF, (t >> 28) & 0xF, (t >> 24) & 1, (t >> 12) & 0xFFF, t & 0xFFF,
++                           e.first * k, e.second);
++      }
++      REXGPU_INFO("[nhl-gpuresolve]{}", res);
++      nhl_gpu_resolve_ticks_.clear();
++    }
+     if (!nhl_gpu_tag_ticks_.empty()) {
+       std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> v(nhl_gpu_tag_ticks_.begin(),
+                                                                       nhl_gpu_tag_ticks_.end());
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 6c15fa8..fdc78bf 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <unordered_set>
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
+@@ -49,6 +50,9 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ REXCVAR_DEFINE_BOOL(nhl_force_host_msaa_1x, false, "GPU",
+                     "NHL performance mode: 1-sample host render targets for 2x/4x guest MSAA "
+                     "(no anti-aliasing, less GPU work); host render target path only");
++REXCVAR_DEFINE_BOOL(nhl_dump_only_sample, false, "GPU/Vulkan",
++                    "Resolves: dump only the sample a fast copy reads from multisampled targets")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(nhl_rt_transfer_stats, false, "GPU/Vulkan",
+                     "Log the EDRAM ownership transfers between host render targets once per second "
+                     "([nhl-xfer]: tiles by source and destination sample count)");
+@@ -1299,6 +1303,42 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+                     resolve_info.in_tiled_sequence, rects.size(), s);
+       }
+       if (GetPath() == Path::kHostRenderTargets) {
++        uint32_t nhl_base, nhl_row_length, nhl_rows, nhl_pitch;
++        resolve_info.GetCopyEdramTileSpan(nhl_base, nhl_row_length, nhl_rows, nhl_pitch);
++        const bool nhl_depth = resolve_info.IsCopyingDepth();
++        command_processor_.NhlGpuSetResolveTag(
++            (uint64_t(copy_shader) << 32) |
++            (uint64_t(nhl_depth ? resolve_info.depth_edram_info.msaa_samples
++                                : resolve_info.color_edram_info.msaa_samples)
++             << 28) |
++            (uint64_t(nhl_depth) << 24) | (uint64_t(nhl_rows & 0xFFF) << 12) | (nhl_row_length & 0xFFF));
++        static std::unordered_set<uint64_t> nhl_seen_resolves;
++        if (std::getenv("REX_GPU_PROF") &&
++            nhl_seen_resolves.insert((uint64_t(copy_shader) << 48) ^ (uint64_t(nhl_base) << 32) ^
++                                     (uint64_t(nhl_row_length) << 16) ^ nhl_rows ^
++                                     (uint64_t(resolve_info.copy_dest_base) << 20)).second) {
++          REXGPU_INFO("[nhl-res-new] shader {} depth {} samples {} edram base {} row_len {} rows {} pitch {} dest {:08X} "
++                      "extent {:08X}+{:X} size {}x{}", uint32_t(copy_shader), nhl_depth,
++                      uint32_t(nhl_depth ? resolve_info.depth_edram_info.msaa_samples
++                                         : resolve_info.color_edram_info.msaa_samples),
++                      nhl_base, nhl_row_length, nhl_rows, nhl_pitch, resolve_info.copy_dest_base,
++                      resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length,
++                      uint32_t(resolve_info.coordinate_info.width_div_8) * 8,
++                      uint32_t(resolve_info.height_div_8) * 8);
++        }
++        command_processor_.NhlGpuMark(VulkanCommandProcessor::kNhlGpuDump);
++        // Fast copies read one sample per pixel (or, for k01, k23 and k0123, their first).
++        nhl_dump_only_sample_ = 0;
++        const xenos::MsaaSamples nhl_msaa = nhl_depth ? resolve_info.depth_edram_info.msaa_samples
++                                                      : resolve_info.color_edram_info.msaa_samples;
++        if (REXCVAR_GET(nhl_dump_only_sample) && nhl_msaa != xenos::MsaaSamples::k1X &&
++            (copy_shader == draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA ||
++             copy_shader == draw_util::ResolveCopyShaderIndex::kFast32bpp4xMSAA)) {
++          const uint32_t select = uint32_t(resolve_info.copy_dest_coordinate_info.copy_sample_select);
++          const uint32_t first = select <= 3 ? select : (select == 5 ? 2 : 0);
++          nhl_dump_only_sample_msaa_ = nhl_msaa;
++          nhl_dump_only_sample_ = 1 + (((first >> 1) & 1) | (((first >> 0) & 1) << 1));
++        }
+         if (REXCVAR_GET(direct_host_resolve)) {
+           direct_resolved =
+               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
+@@ -1321,6 +1361,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+             return false;
+           }
+         }
++        nhl_dump_only_sample_ = 0;
++        command_processor_.NhlGpuMark(VulkanCommandProcessor::kNhlGpuResolve);
+       }
+ 
+       uint32_t copy_dest_range_unscaled = resolve_info.copy_dest_extent_start -
+@@ -6378,6 +6420,38 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+       spv::OpIAdd, type_uint,
+       builder.createBinOp(spv::OpIMul, type_uint, const_tile_height, source_tile_index_y),
+       tile_sample_y);
++  if (key.nhl_only_sample) {
++    // Only one sample per pixel is read by the copy after this dump, so leave the others out.
++    // REX_NHL_DUMP_POISON=wrong: negative control, keep another sample than the copy reads.
++    const char* nhl_poison = std::getenv("REX_NHL_DUMP_POISON");
++    const uint32_t only_sample =
++        (key.nhl_only_sample - 1) ^ (nhl_poison && nhl_poison[0] == 'w' ? 2 : 0);
++    const spv::Id nhl_uint_1 = builder.makeUintConstant(1);
++    spv::Id nhl_other_sample = builder.createBinOp(
++        spv::OpINotEqual, builder.makeBoolType(),
++        builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_y, nhl_uint_1),
++        builder.makeUintConstant(only_sample >> 1));
++    if (key.msaa_samples >= xenos::MsaaSamples::k4X) {
++      nhl_other_sample = builder.createBinOp(
++          spv::OpLogicalOr, builder.makeBoolType(), nhl_other_sample,
++          builder.createBinOp(
++              spv::OpINotEqual, builder.makeBoolType(),
++              builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_x, nhl_uint_1),
++              builder.makeUintConstant(only_sample & 1)));
++    }
++    SpirvBuilder::IfBuilder nhl_other_sample_if(nhl_other_sample, spv::SelectionControlDontFlattenMask,
++                                                builder);
++    if (std::getenv("REX_NHL_DUMP_POISON") && !format_is_64bpp) {
++      // Validation: the copy must never see these, so nothing may change on screen.
++      id_vector_temp.clear();
++      id_vector_temp.push_back(builder.makeIntConstant(0));
++      id_vector_temp.push_back(builder.createUnaryOp(spv::OpBitcast, type_int, edram_sample_address));
++      builder.createStore(builder.makeUintConstant(0xFF00FFFF),
++                          builder.createAccessChain(spv::StorageClassUniform, edram_buffer, id_vector_temp));
++    }
++    builder.makeReturn(true);
++    nhl_other_sample_if.makeEndIf();
++  }
+   // Get the source pixel coordinate and the sample index within the pixel.
+   spv::Id source_pixel_x = source_sample_x, source_pixel_y = source_sample_y;
+   spv::Id source_sample_id = spv::NoResult;
+@@ -6814,6 +6888,9 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
+     pipeline_key.msaa_samples = rt_key.msaa_samples;
+     pipeline_key.resource_format = rt_key.resource_format;
+     pipeline_key.is_depth = rt_key.is_depth;
++    if (nhl_dump_only_sample_ && rt_key.msaa_samples == nhl_dump_only_sample_msaa_) {
++      pipeline_key.nhl_only_sample = nhl_dump_only_sample_;
++    }
+     dump_invocations_.emplace_back(rectangle, pipeline_key);
+   }
+ 
+-- 
+2.47.3
+

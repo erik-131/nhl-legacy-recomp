@@ -1,0 +1,41 @@
+From 11a6ac91302ae8c0d3d95543d57a6150f7fb5f67 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 14:27:56 +0100
+Subject: [PATCH 36/41] vulkan: nhl_async_no_submit_wait, EndSubmission neither
+ compiles nor waits for pipelines (default off)
+
+---
+ src/graphics/vulkan/pipeline_cache.cpp | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 5731ae9..56a9e81 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -52,6 +52,10 @@
+ REXCVAR_DEFINE_BOOL(nhl_async_no_placeholder, true, "GPU/Vulkan",
+                     "Don't compile placeholder pipelines for draws that are dropped anyway")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_async_no_submit_wait, false, "GPU/Vulkan",
++                    "EndSubmission neither compiles queued pipelines on the command thread nor waits "
++                    "for the compile workers. Only takes effect with nhl_async_no_placeholder")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
+ REXCVAR_DEFINE_INT32(
+     vulkan_pipeline_creation_threads, -1, "GPU/Vulkan",
+@@ -769,7 +773,11 @@ void VulkanPipelineCache::EndSubmission() {
+       std::lock_guard<std::mutex> lock(creation_request_lock_);
+       startup_loading = startup_loading_;
+     }
+-    if (startup_loading) {
++    // Safe only when no command in this submission can name a pipeline that is still compiling:
++    // IssueDraw drops draws whose handle is a placeholder, and with nhl_async_no_placeholder a
++    // pending pipeline has no VkPipeline at all.
++    if (startup_loading ||
++        (REXCVAR_GET(nhl_async_no_submit_wait) && REXCVAR_GET(nhl_async_no_placeholder))) {
+       creation_request_cond_.notify_one();
+     } else {
+       // Help worker threads on the processor thread to reduce warm-up latency.
+-- 
+2.47.3
+

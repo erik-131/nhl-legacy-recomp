@@ -1,0 +1,70 @@
+From 219a9c6ad50b091c394d43f6cb3f97ff7d5a2a62 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Fri, 30 Oct 2026 18:29:22 +0100
+Subject: [PATCH] NHL diag: [nhl-present] host presents/s + gaps,
+ [nhl-paintmode] presenter paint mode changes
+
+---
+ src/ui/presenter.cpp               |  4 ++++
+ src/ui/vulkan/vulkan_presenter.cpp | 22 ++++++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..465ae00 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -1300,6 +1300,10 @@ void Presenter::SetPaintModeFromUIThread(PaintMode new_mode) {
+     std::lock_guard<std::mutex> lock(paint_mode_mutex_);
+     paint_mode_ = new_mode;
+   }
++  // [nhl-paintmode]: guest-thread immediate presents vs UI-thread paints on request (the
++  // latter caps the visible frame rate well below the guest's on the NUC).
++  REXLOG_INFO("[nhl-paintmode] mode={} implicit_vsync={} ui_drawers={}", int(new_mode),
++              surface_paint_connection_has_implicit_vsync_, ui_drawers_.size());
+   UpdateUITicksNeededFromUIThread();
+ }
+ 
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..bf9266e 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cmath>
+@@ -2240,7 +2241,28 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   {
+     const VulkanDevice::Queue::Acquisition queue_acquisition =
+         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
++    const auto nhl_t0 = std::chrono::steady_clock::now();
+     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
++    // [nhl-present]: what actually reaches the screen, once per second - host presents,
++    // the largest interval between presents and the time blocked inside vkQueuePresentKHR.
++    static auto win_start = nhl_t0, last = nhl_t0;
++    static uint32_t presents = 0, gaps_over_50 = 0;
++    static double max_gap_ms = 0.0, in_present_ms = 0.0;
++    const auto nhl_t1 = std::chrono::steady_clock::now();
++    const double gap_ms = std::chrono::duration<double, std::milli>(nhl_t0 - last).count();
++    last = nhl_t0;
++    ++presents;
++    max_gap_ms = std::max(max_gap_ms, gap_ms);
++    gaps_over_50 += gap_ms > 50.0;
++    in_present_ms += std::chrono::duration<double, std::milli>(nhl_t1 - nhl_t0).count();
++    const double win_ms = std::chrono::duration<double, std::milli>(nhl_t1 - win_start).count();
++    if (win_ms >= 1000.0) {
++      REXLOG_INFO("[nhl-present] presents={} fps={:.1f} max_gap={:.1f}ms gaps>50ms={} in_present={:.1f}ms",
++                  presents, presents * 1000.0 / win_ms, max_gap_ms, gaps_over_50, in_present_ms);
++      win_start = nhl_t1;
++      presents = gaps_over_50 = 0;
++      max_gap_ms = in_present_ms = 0.0;
++    }
+   }
+   switch (present_result) {
+     case VK_SUCCESS:
+-- 
+2.47.3
+

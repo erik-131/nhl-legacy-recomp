@@ -1,0 +1,343 @@
+From 2c08d7bde7489bca3fc04a4a8d6774452b369b17 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 00:06:16 +0100
+Subject: [PATCH] NHL: RT clear-through for XDK clear quads
+ (nhl_rt_clear_through, default off)
+
+---
+ .../graphics/pipeline/render_target/cache.h   |   6 +
+ .../rex/graphics/vulkan/render_target_cache.h |   8 +
+ src/graphics/pipeline/render_target/cache.cpp |  24 +++
+ src/graphics/vulkan/command_processor.cpp     |  12 ++
+ src/graphics/vulkan/render_target_cache.cpp   | 190 +++++++++++++++++-
+ 5 files changed, 237 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 8ddfe5a..05da07b 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -546,6 +546,12 @@ class RenderTargetCache {
+   // For proving that a draw overwrites parts of the render targets (CPU vertex shader runs).
+   DrawExtentEstimator& draw_extent_estimator() { return draw_extent_estimator_; }
+ 
++  // nhl_rt_clear_through: the host color render target owning all of the EDRAM tiles
++  // [start_tiles, end_tiles) (no wrapping), if it's one render target with the host resource
++  // format of guest_format, or nullptr.
++  RenderTarget* GetSingleColorOwner(uint32_t start_tiles, uint32_t end_tiles,
++                                    xenos::ColorRenderTargetFormat guest_format) const;
++
+   // For pixel shader interlock.
+ 
+   virtual void RequestPixelShaderInterlockBarrier() {}
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 0d4a35a..38ff795 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -119,6 +119,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // nhl_rt_skip_overwritten_transfers: the pixel shader the host draw will use (null if
+   // none), set by the command processor before Update for the overwrite proof.
+   const Shader* nhl_overwrite_pixel_shader = nullptr;
++  // nhl_rt_clear_through: if the draw is an XDK clear quad that replaces whole rows of EDRAM
++  // tiles owned by another host render target (NHL clears its 1x / 2x targets through 4x MSAA
++  // aliases), clears those tiles in the owner instead. Returns the bits of
++  // normalized_color_mask handled this way - the caller must not draw them.
++  uint32_t ClearThroughAliases(const memory::Memory& memory,
++                               reg::RB_DEPTHCONTROL normalized_depth_control,
++                               uint32_t normalized_color_mask, const Shader& vertex_shader,
++                               const Shader* pixel_shader);
+   // NHL diag: keys of the bound host depth and color 0 render targets (0 if none).
+   void NhlGetBoundKeys(uint32_t& depth_key, uint32_t& color0_key) const {
+     depth_key = color0_key = 0;
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index b6f2cbf..6b2da4d 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -836,6 +836,30 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
+   group_count_y_out = (transfer_rectangle.height_pixels * pixel_size_y) >> 3;
+ }
+ 
++RenderTargetCache::RenderTarget* RenderTargetCache::GetSingleColorOwner(
++    uint32_t start_tiles, uint32_t end_tiles, xenos::ColorRenderTargetFormat guest_format) const {
++  if (start_tiles >= end_tiles || end_tiles > xenos::kEdramTileCount) {
++    return nullptr;
++  }
++  // The range containing start_tiles (ranges are consecutive and merged when the owners are
++  // the same, so one range must cover all the tiles).
++  auto it = ownership_ranges_.upper_bound(start_tiles);
++  if (it == ownership_ranges_.cbegin()) {
++    return nullptr;
++  }
++  --it;
++  if (it->first > start_tiles || it->second.end_tiles < end_tiles) {
++    return nullptr;
++  }
++  RenderTargetKey owner = it->second.render_target;
++  if (owner.IsEmpty() || owner.is_depth ||
++      owner.resource_format != uint32_t(GetColorResourceFormat(guest_format))) {
++    return nullptr;
++  }
++  auto it_rt = render_targets_.find(owner);
++  return it_rt != render_targets_.cend() ? it_rt->second : nullptr;
++}
++
+ void RenderTargetCache::GetResolveCopyRectanglesToDump(
+     uint32_t base, uint32_t row_length, uint32_t rows, uint32_t pitch,
+     std::vector<ResolveCopyDumpRectangle>& rectangles_out) const {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 707cd6f..d905774 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4125,6 +4125,18 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // Set up the render targets - this may perform dispatches and draws.
+   render_target_cache_->nhl_log_ownership = nhl_reslog_state == 2;
+   render_target_cache_->nhl_overwrite_pixel_shader = pixel_shader;
++  if (uint32_t cleared_color_mask = render_target_cache_->ClearThroughAliases(
++          *memory_, normalized_depth_control, normalized_color_mask, *vertex_shader,
++          pixel_shader)) {
++    normalized_color_mask &= ~cleared_color_mask;
++    // Nothing left to draw if the clear wrote only the colors cleared through.
++    bool writes_depth_stencil =
++        (normalized_depth_control.z_enable && normalized_depth_control.z_write_enable) ||
++        normalized_depth_control.stencil_enable;
++    if (!normalized_color_mask && !writes_depth_stencil) {
++      return true;
++    }
++  }
+   if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
+                                     normalized_color_mask, *vertex_shader)) {
+     return draw_fail("render_target_update");
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index a087704..3908aaa 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -14,9 +14,11 @@
+ #include <chrono>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdlib>
+ #include <cstdint>
+ #include <cstring>
+ #include <memory>
++#include <set>
+ #include <tuple>
+ #include <utility>
+ #include <vector>
+@@ -53,6 +55,19 @@ REXCVAR_DEFINE_BOOL(nhl_rt_skip_overwritten_transfers, false, "GPU/Vulkan",
+                     "render targets that the current draw (an XDK clear quad, for instance) "
+                     "provably replaces entirely, and do the rest around that area");
+ 
++REXCVAR_DEFINE_BOOL(nhl_rt_clear_through, false, "GPU/Vulkan",
++                    "Host render targets: do XDK clear quads drawn to an alias of other render "
++                    "targets (4x MSAA over 1x / 2x in NHL) as clears of the render targets "
++                    "owning those EDRAM tiles, instead of drawing to the alias and copying back");
++
++REXCVAR_DEFINE_STRING(nhl_rt_clear_vertex_shader_hash, "0A6D1DD7767FDF27", "GPU/Vulkan",
++                      "nhl_rt_clear_through: ucode hash (hex) of the XDK clear vertex shader, "
++                      "which passes xyz and an RGBA color through from its vertex stream");
++
++REXCVAR_DEFINE_STRING(nhl_rt_clear_pixel_shader_hash, "2E372EA28CC404B7", "GPU/Vulkan",
++                      "nhl_rt_clear_through: ucode hash (hex) of the XDK clear pixel shader, "
++                      "which outputs the interpolated color");
++
+ REXCVAR_DEFINE_BOOL(nhl_rt_debug_poison_overwrites, false, "GPU/Vulkan",
+                     "Debugging nhl_rt_skip_overwritten_transfers: before each draw proven to "
+                     "overwrite parts of render targets entirely, fill those parts with garbage. "
+@@ -123,6 +138,8 @@ struct NhlTransferStats {
+   // Transfers skipped entirely / performed around the area a draw overwrites.
+   uint64_t dropped_tiles = 0;
+   uint64_t cut_tiles = 0;
++  // Tiles cleared in their owner instead of drawn to an alias (nhl_rt_clear_through).
++  uint64_t cleared_through_tiles = 0;
+ };
+ NhlTransferStats nhl_transfer_stats;
+ 
+@@ -145,9 +162,10 @@ void NhlTransferStatsMaybeLog() {
+       }
+     }
+   }
+-  REXGPU_INFO("[nhl-xfer] {:.2f}s calls={} transfers={} tiles={} dropped={} cut={} |{}", seconds,
+-              stats.calls, stats.transfers, stats.tiles, stats.dropped_tiles, stats.cut_tiles,
+-              pairs);
++  REXGPU_INFO("[nhl-xfer] {:.2f}s calls={} transfers={} tiles={} dropped={} cut={} "
++              "cleared_through={} |{}",
++              seconds, stats.calls, stats.transfers, stats.tiles, stats.dropped_tiles,
++              stats.cut_tiles, stats.cleared_through_tiles, pairs);
+   stats = NhlTransferStats();
+   stats.window_start = now;
+ }
+@@ -4878,6 +4896,172 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+   return transfer_pipelines_.emplace(key, pipelines).first->second.data();
+ }
+ 
++uint32_t VulkanRenderTargetCache::ClearThroughAliases(
++    const memory::Memory& memory, reg::RB_DEPTHCONTROL normalized_depth_control,
++    uint32_t normalized_color_mask, const Shader& vertex_shader, const Shader* pixel_shader) {
++  if (!REXCVAR_GET(nhl_rt_clear_through) || GetPath() != Path::kHostRenderTargets ||
++      !normalized_color_mask || !pixel_shader) {
++    return 0;
++  }
++  auto regs_rectangle_list_of_3 = [this]() {
++    auto draw_initiator = register_file().Get<reg::VGT_DRAW_INITIATOR>();
++    return draw_initiator.prim_type == xenos::PrimitiveType::kRectangleList &&
++           draw_initiator.num_indices == 3 &&
++           draw_initiator.source_select == xenos::SourceSelect::kAutoIndex;
++  };
++  if (vertex_shader.ucode_data_hash() !=
++          std::strtoull(REXCVAR_GET(nhl_rt_clear_vertex_shader_hash).c_str(), nullptr, 16) ||
++      pixel_shader->ucode_data_hash() !=
++          std::strtoull(REXCVAR_GET(nhl_rt_clear_pixel_shader_hash).c_str(), nullptr, 16)) {
++    // Name the shaders of draws that would qualify otherwise, once per pair, so the hashes of
++    // this game's clear shaders can be configured.
++    if (regs_rectangle_list_of_3()) {
++      nhl_overwrite_pixel_shader = pixel_shader;
++      Transfer::Rectangle candidate_rectangle;
++      if (GetDrawOverwrittenRenderTargets(normalized_depth_control, normalized_color_mask,
++                                          vertex_shader, candidate_rectangle) &
++          ~uint32_t(1)) {
++        static std::set<std::pair<uint64_t, uint64_t>> logged;
++        if (logged.emplace(vertex_shader.ucode_data_hash(), pixel_shader->ucode_data_hash())
++                .second) {
++          REXGPU_INFO("[nhl-clearthrough] overwriting rectangle-list draw with VS {:016X} "
++                      "PS {:016X} ({}x{}) - not the configured clear shaders",
++                      vertex_shader.ucode_data_hash(), pixel_shader->ucode_data_hash(),
++                      candidate_rectangle.width_pixels, candidate_rectangle.height_pixels);
++        }
++      }
++    }
++    return 0;
++  }
++  // The colors the draw provably replaces in the rectangle (depth and stencil may be written
++  // too - they're still drawn).
++  nhl_overwrite_pixel_shader = pixel_shader;
++  Transfer::Rectangle rectangle;
++  uint32_t overwritten = GetDrawOverwrittenRenderTargets(
++                             normalized_depth_control, normalized_color_mask, vertex_shader,
++                             rectangle) &
++                         ~uint32_t(1);
++  if (!overwritten) {
++    return 0;
++  }
++  const RegisterFile& regs = register_file();
++
++  // The clear color, constant across the vertices: the clear vertex shader takes xyz (w = 1)
++  // and the color from its only vertex stream, and the pixel shader outputs it.
++  const std::vector<Shader::VertexBinding>& bindings = vertex_shader.vertex_bindings();
++  if (bindings.size() != 1 || bindings[0].stride_words < 7) {
++    return 0;
++  }
++  uint32_t stride = bindings[0].stride_words;
++  xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(bindings[0].fetch_constant);
++  if (fetch.type != xenos::FetchConstantType::kVertex || fetch.size < stride * 2 + 7) {
++    return 0;
++  }
++  const uint32_t* vertices =
++      memory.TranslatePhysical<const uint32_t*>(fetch.address * sizeof(uint32_t));
++  if (!vertices) {
++    return 0;
++  }
++  uint32_t color_bits[4];
++  for (uint32_t i = 0; i < 3; ++i) {
++    for (uint32_t j = 0; j < 4; ++j) {
++      uint32_t value = xenos::GpuSwap(vertices[stride * i + 3 + j], fetch.endian);
++      if (!i) {
++        color_bits[j] = value;
++      } else if (value != color_bits[j]) {
++        return 0;
++      }
++    }
++  }
++  float color[4];
++  std::memcpy(color, color_bits, sizeof(color));
++  for (uint32_t j = 0; j < 4; ++j) {
++    if (!std::isfinite(color[j])) {
++      return 0;
++    }
++    color[j] = std::clamp(color[j], 0.0f, 1.0f);
++  }
++
++  // Whole rows of tiles of the surface: a contiguous range of EDRAM tiles, whatever the layout
++  // of the render target owning it.
++  auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  uint32_t msaa_samples_x_log2 = uint32_t(surface_info.msaa_samples >= xenos::MsaaSamples::k4X);
++  uint32_t msaa_samples_y_log2 = uint32_t(surface_info.msaa_samples >= xenos::MsaaSamples::k2X);
++  uint32_t pitch_tiles = ((uint32_t(surface_info.surface_pitch) << msaa_samples_x_log2) +
++                          (xenos::kEdramTileWidthSamples - 1)) /
++                         xenos::kEdramTileWidthSamples;
++  uint32_t tile_width = xenos::kEdramTileWidthSamples >> msaa_samples_x_log2;
++  uint32_t tile_height = xenos::kEdramTileHeightSamples >> msaa_samples_y_log2;
++  if (!pitch_tiles || rectangle.x_pixels ||
++      rectangle.width_pixels < pitch_tiles * tile_width || rectangle.y_pixels % tile_height ||
++      rectangle.height_pixels % tile_height) {
++    return 0;
++  }
++  uint32_t first_row = rectangle.y_pixels / tile_height;
++  uint32_t row_count = rectangle.height_pixels / tile_height;
++
++  uint32_t cleared_color_mask = 0;
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    if (!(overwritten & (uint32_t(1) << (1 + i)))) {
++      continue;
++    }
++    auto color_info = regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i]);
++    // Unorm formats stored the same way from a clear value as from the pixel shader.
++    uint64_t clear_value;
++    switch (color_info.color_format) {
++      case xenos::ColorRenderTargetFormat::k_8_8_8_8:
++        clear_value = 0;
++        for (uint32_t j = 0; j < 4; ++j) {
++          clear_value |= uint64_t(uint32_t(color[j] * 255.0f + 0.5f)) << (j * 8);
++        }
++        break;
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10:
++      case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
++        clear_value = 0;
++        for (uint32_t j = 0; j < 3; ++j) {
++          clear_value |= uint64_t(uint32_t(color[j] * 1023.0f + 0.5f)) << (j * 10);
++        }
++        clear_value |= uint64_t(uint32_t(color[3] * 3.0f + 0.5f)) << 30;
++        break;
++      default:
++        continue;
++    }
++    if (color_info.color_exp_bias) {
++      continue;
++    }
++    uint32_t start_tiles = color_info.color_base + first_row * pitch_tiles;
++    uint32_t end_tiles = start_tiles + row_count * pitch_tiles;
++    RenderTarget* owner = GetSingleColorOwner(start_tiles, end_tiles, color_info.color_format);
++    if (!owner) {
++      continue;
++    }
++    RenderTargetKey owner_key = owner->key();
++    if (start_tiles < owner_key.base_tiles) {
++      // Owned through EDRAM addressing wrapping - not handled.
++      continue;
++    }
++    Transfer::Rectangle owner_rectangles[Transfer::kMaxRectanglesWithoutCutout];
++    uint32_t owner_rectangle_count = Transfer::GetRangeRectangles(
++        start_tiles, end_tiles, owner_key.base_tiles, owner_key.GetPitchTiles(),
++        owner_key.msaa_samples, owner_key.Is64bpp(), owner_rectangles);
++    std::vector<Transfer> no_transfers;
++    // nhl_rt_debug_poison_overwrites: garbage first, the clear must replace all of it.
++    bool poison = REXCVAR_GET(nhl_rt_debug_poison_overwrites);
++    for (uint32_t j = 0; j < owner_rectangle_count; ++j) {
++      if (poison) {
++        uint64_t poison_value = 0x5A5AA5A55A5AA5A5ull;
++        PerformTransfersAndResolveClears(1, &owner, &no_transfers, &poison_value,
++                                         &owner_rectangles[j]);
++      }
++      PerformTransfersAndResolveClears(1, &owner, &no_transfers, &clear_value,
++                                       &owner_rectangles[j]);
++    }
++    nhl_transfer_stats.cleared_through_tiles += end_tiles - start_tiles;
++    cleared_color_mask |= uint32_t(0b1111) << (4 * i);
++  }
++  return cleared_color_mask;
++}
++
+ uint32_t VulkanRenderTargetCache::GetDrawOverwrittenRenderTargets(
+     reg::RB_DEPTHCONTROL normalized_depth_control, uint32_t normalized_color_mask,
+     const Shader& vertex_shader, Transfer::Rectangle& rectangle_out) {
+-- 
+2.47.3
+

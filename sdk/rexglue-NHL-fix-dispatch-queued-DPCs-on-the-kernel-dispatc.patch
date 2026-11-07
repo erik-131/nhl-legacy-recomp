@@ -1,0 +1,108 @@
+From 0e6180b51fb46d801eb6395d72d9088741487e38 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 01:59:09 +0100
+Subject: [PATCH] NHL fix: dispatch queued DPCs on the kernel dispatch thread
+ (boot stall: D3D worker wake-up DPC never ran) + [nhl-dpc] log
+
+---
+ include/rex/system/kernel_state.h          |  2 +
+ src/kernel/xboxkrnl/xboxkrnl_threading.cpp | 45 +++++++++++++++++++++-
+ src/system/kernel_state.cpp                |  6 +++
+ 3 files changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/include/rex/system/kernel_state.h b/include/rex/system/kernel_state.h
+index 9b9cf9e..be820b5 100644
+--- a/include/rex/system/kernel_state.h
++++ b/include/rex/system/kernel_state.h
+@@ -303,6 +303,8 @@ class KernelState {
+   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
+                                      uint32_t extended_error, uint32_t length);
+ 
++  // Runs fn on the "Kernel Dispatch" host thread (a guest-capable XHostThread), in order.
++  void QueueDispatch(std::function<void()> fn);
+   void CompleteOverlappedDeferred(std::function<void()> completion_callback,
+                                   uint32_t overlapped_ptr, X_RESULT result,
+                                   std::function<void()> pre_callback = nullptr,
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index 57fd161..c07783d 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -1176,8 +1176,11 @@ void KeInitializeDpc_entry(ppc_ptr_t<XDPC> dpc, mapped_void routine, mapped_void
+ }
+ 
+ u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
+-  assert_always("DPC does not dispatch yet; going to hang!");
+-
++  // DPCs used to be queued and never run. NHL Legacy's D3D queues work for its per-core
++  // worker threads (sub_827ED828 / sub_827FAEF0) and wakes them only through a DPC whose
++  // routine (sub_827FAA18) calls KeSetEvent; when a worker sat in its infinite wait, the
++  // work was never processed and boot stalled. Run each queued DPC on the kernel dispatch
++  // thread (in order, like a DPC queue drained at DISPATCH_LEVEL).
+   uint32_t list_entry_ptr = dpc.guest_address() + 4;
+ 
+   // Lock dispatcher.
+@@ -1195,6 +1198,44 @@ u32 KeInsertQueueDpc_entry(ppc_ptr_t<XDPC> dpc, u32 arg1, u32 arg2) {
+ 
+   dpc_list->Insert(list_entry_ptr);
+ 
++  const uint32_t dpc_ptr = dpc.guest_address();
++  REX_KERNEL_STATE()->QueueDispatch([dpc_ptr, list_entry_ptr]() {
++    auto kernel_state = REX_KERNEL_STATE();
++    uint32_t routine, context, a1, a2;
++    {
++      // KeRemoveQueueDpc may have dequeued it meanwhile; then it must not run.
++      auto lock = rex::thread::global_critical_region::AcquireDirect();
++      auto list = kernel_state->dpc_list();
++      if (!list->IsQueued(list_entry_ptr)) {
++        return;
++      }
++      list->Remove(list_entry_ptr);
++      auto d = kernel_state->memory()->TranslateVirtual<XDPC*>(dpc_ptr);
++      routine = d->routine;
++      context = d->context;
++      a1 = d->arg1;
++      a2 = d->arg2;
++    }
++    if (!routine) {
++      return;
++    }
++    // DeferredRoutine(Dpc, DeferredContext, SystemArgument1, SystemArgument2).
++    uint64_t args[] = {dpc_ptr, context, a1, a2};
++    kernel_state->function_dispatcher()->Execute(XThread::GetCurrentThread()->thread_state(),
++                                                 routine, args, rex::countof(args));
++    // [nhl-dpc]: DPCs run, at most one line per second.
++    static std::atomic<uint64_t> ran{0};
++    static std::atomic<int64_t> last_log_ms{0};
++    ++ran;
++    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                               std::chrono::steady_clock::now().time_since_epoch())
++                               .count();
++    if (now_ms - last_log_ms.load() >= 1000) {
++      last_log_ms = now_ms;
++      REXKRNL_INFO("[nhl-dpc] ran={} last routine={:08X}", ran.load(), routine);
++    }
++  });
++
+   return 1;
+ }
+ 
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 697399c..22cfb97 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -1175,6 +1175,12 @@ void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESUL
+   CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+ }
+ 
++void KernelState::QueueDispatch(std::function<void()> fn) {
++  auto global_lock = global_critical_region_.Acquire();
++  dispatch_queue_.push_back(std::move(fn));
++  dispatch_cond_.notify_all();
++}
++
+ void KernelState::CompleteOverlappedDeferred(std::function<void()> completion_callback,
+                                              uint32_t overlapped_ptr, X_RESULT result,
+                                              std::function<void()> pre_callback,
+-- 
+2.47.3
+

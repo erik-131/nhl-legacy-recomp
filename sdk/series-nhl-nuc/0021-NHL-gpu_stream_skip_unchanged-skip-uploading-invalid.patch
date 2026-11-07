@@ -1,0 +1,234 @@
+From ea88b898d33088971bdfd4706b4a918a76148289 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Sat, 31 Oct 2026 03:42:23 +0100
+Subject: [PATCH 21/41] NHL: gpu_stream_skip_unchanged - skip uploading
+ invalidated pages whose bytes did not change (default off)
+
+---
+ include/rex/graphics/shared_memory.h  |  20 +++++
+ src/graphics/shared_memory.cpp        | 109 ++++++++++++++++++++++++++
+ src/graphics/vulkan/shared_memory.cpp |   5 +-
+ 3 files changed, 131 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..cf99035 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -10,6 +10,8 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <unordered_map>
++#include <memory>
+ #include <cstdint>
+ #include <mutex>
+ #include <utility>
+@@ -140,6 +142,11 @@ class SharedMemory {
+   virtual bool UploadRanges(
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
+ 
++  // Backends copy the guest pages of an upload into the upload buffer through this (after
++  // MakeRangeValid for them), so gpu_stream_skip_unchanged can remember the exact bytes the GPU
++  // copy of each page now holds.
++  void CopyPagesForUpload(uint32_t page_first, uint32_t page_count, uint8_t* dest);
++
+  private:
+   memory::Memory& memory_;
+ 
+@@ -161,6 +168,19 @@ class SharedMemory {
+   // persistently allocated vector).
+   std::vector<std::pair<uint32_t, uint32_t>> upload_ranges_;
+ 
++  // gpu_stream_skip_unchanged (after the Simpsons recomp's option of that name): the bytes
++  // each page was last uploaded with, which is what the GPU copy of the page holds until the
++  // GPU writes it. A page that was invalidated by a guest write (often only because a
++  // neighbouring page was written - invalidation is widened up to 256 KB) and still holds
++  // those bytes when it is requested again is made valid without an upload; a request whose
++  // pages are all unchanged then needs no upload, barrier or render pass break at all.
++  // Only touched on the command processor thread.
++  static constexpr size_t kStreamedPageShadowsMax = 16384;  // 64 MB with 4 KB pages
++  std::unordered_map<uint32_t, std::unique_ptr<uint8_t[]>> streamed_page_shadows_;
++  std::vector<std::pair<uint32_t, uint32_t>> kept_upload_ranges_;
++  void DropUnchangedPages();
++  void EraseStreamedPageShadows(uint32_t page_first, uint32_t page_last);
++
+   // Mutex between the guest memory subsystem and the command processor, to be
+   // locked when checking or updating validity of pages/ranges and when firing
+   // watches.
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index ec0df7c..7640d7f 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -10,16 +10,23 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <cstring>
+ #include <utility>
+ 
+ #include <rex/assert.h>
+ #include <rex/bit.h>
++#include <rex/cvar.h>
+ #include <rex/dbg.h>
+ #include <rex/graphics/shared_memory.h>
+ #include <rex/math.h>
++#include <rex/logging.h>
+ #include <rex/memory.h>
+ 
++REXCVAR_DEFINE_BOOL(gpu_stream_skip_unchanged, false, "GPU",
++                    "Skip re-uploading guest pages whose bytes are the same as when they were "
++                    "last uploaded (each upload ends the render pass and adds barriers)");
++
+ namespace rex::graphics {
+ 
+ SharedMemory::SharedMemory(memory::Memory& memory) : memory_(memory) {
+@@ -106,6 +113,7 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
+ }
+ 
+ void SharedMemory::ClearCache() {
++  streamed_page_shadows_.clear();
+   // Keeping GPU-written data, so "invalidated by GPU".
+   FireWatches(0, (kBufferSize - 1) >> page_size_log2_, true);
+   // No watches now, so no references to the pools accessible by guest threads -
+@@ -290,6 +298,9 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length, bool written_
+   uint32_t valid_page_last = last >> page_size_log2_;
+   uint32_t valid_block_first = valid_page_first >> 6;
+   uint32_t valid_block_last = valid_page_last >> 6;
++  if (written_by_gpu) {
++    EraseStreamedPageShadows(valid_page_first, valid_page_last);
++  }
+ 
+   {
+     auto global_lock = global_critical_region_.Acquire();
+@@ -461,6 +472,11 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+   COUNT_profile_set("gpu/shared_memory/request_ranges_upload_count",
+                     uint32_t(upload_ranges_.size()));
+ 
++  if (!upload_ranges_.empty() && !streamed_page_shadows_.empty() &&
++      REXCVAR_GET(gpu_stream_skip_unchanged)) {
++    DropUnchangedPages();
++  }
++
+   if (upload_ranges_.empty()) {
+     return true;
+   }
+@@ -468,6 +484,99 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+   return UploadRanges(upload_ranges_);
+ }
+ 
++void SharedMemory::DropUnchangedPages() {
++  // [nhl-skipunchanged] once per second: pages dropped/kept, requests needing no upload at all.
++  static uint64_t stat_dropped = 0, stat_kept = 0, stat_requests = 0, stat_skipped = 0;
++  static auto stat_t0 = std::chrono::steady_clock::now();
++  const uint32_t page_size = uint32_t(1) << page_size_log2_;
++  kept_upload_ranges_.clear();
++  auto keep = [this](uint32_t page) {
++    if (!kept_upload_ranges_.empty() &&
++        kept_upload_ranges_.back().first + kept_upload_ranges_.back().second == page) {
++      ++kept_upload_ranges_.back().second;
++    } else {
++      kept_upload_ranges_.emplace_back(page, 1);
++    }
++  };
++  for (const std::pair<uint32_t, uint32_t>& range : upload_ranges_) {
++    for (uint32_t page = range.first; page < range.first + range.second; ++page) {
++      auto shadow_it = streamed_page_shadows_.find(page);
++      if (shadow_it == streamed_page_shadows_.end()) {
++        keep(page);
++        ++stat_kept;
++        continue;
++      }
++      // Protect first, then compare, like an upload: a guest write after this point faults and
++      // invalidates the page again, so it can't be missed.
++      MakeRangeValid(page << page_size_log2_, page_size, false);
++      if (std::memcmp(shadow_it->second.get(), memory().TranslatePhysical(page << page_size_log2_),
++                      page_size) == 0) {
++        ++stat_dropped;
++      } else {
++        keep(page);
++        ++stat_kept;
++      }
++    }
++  }
++  ++stat_requests;
++  stat_skipped += kept_upload_ranges_.empty();
++  upload_ranges_.swap(kept_upload_ranges_);
++  const auto now = std::chrono::steady_clock::now();
++  if (now - stat_t0 >= std::chrono::seconds(1)) {
++    REXGPU_INFO("[nhl-skipunchanged] pages dropped={} uploaded={} requests={} fully_skipped={} "
++                "shadows={}",
++                stat_dropped, stat_kept, stat_requests, stat_skipped,
++                streamed_page_shadows_.size());
++    stat_dropped = stat_kept = stat_requests = stat_skipped = 0;
++    stat_t0 = now;
++  }
++}
++
++void SharedMemory::EraseStreamedPageShadows(uint32_t page_first, uint32_t page_last) {
++  if (streamed_page_shadows_.empty()) {
++    return;
++  }
++  if (page_last - page_first >= streamed_page_shadows_.size()) {
++    for (auto it = streamed_page_shadows_.begin(); it != streamed_page_shadows_.end();) {
++      if (it->first >= page_first && it->first <= page_last) {
++        it = streamed_page_shadows_.erase(it);
++      } else {
++        ++it;
++      }
++    }
++  } else {
++    for (uint32_t page = page_first; page <= page_last; ++page) {
++      streamed_page_shadows_.erase(page);
++    }
++  }
++}
++
++void SharedMemory::CopyPagesForUpload(uint32_t page_first, uint32_t page_count, uint8_t* dest) {
++  const size_t page_size = size_t(1) << page_size_log2_;
++  std::memcpy(dest, memory().TranslatePhysical(page_first << page_size_log2_),
++              page_count * page_size);
++  if (!REXCVAR_GET(gpu_stream_skip_unchanged)) {
++    if (!streamed_page_shadows_.empty()) {
++      streamed_page_shadows_.clear();
++    }
++    return;
++  }
++  // Shadow the bytes as copied to the upload buffer (what the GPU copy will hold), not a
++  // second read of guest memory, which a guest thread may have changed in between.
++  for (uint32_t i = 0; i < page_count; ++i) {
++    std::unique_ptr<uint8_t[]>& shadow = streamed_page_shadows_[page_first + i];
++    if (!shadow) {
++      if (streamed_page_shadows_.size() > kStreamedPageShadowsMax) {
++        // Too many pages to shadow (texture streaming, level loads): start over.
++        streamed_page_shadows_.clear();
++        return;
++      }
++      shadow = std::make_unique<uint8_t[]>(page_size);
++    }
++    std::memcpy(shadow.get(), dest + i * page_size, page_size);
++  }
++}
++
+ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+   std::pair<uint32_t, uint32_t> range(start, length);
+   return RequestRanges(&range, 1);
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 6788214..912caab 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -301,9 +301,8 @@ bool VulkanSharedMemory::UploadRanges(
+         break;
+       }
+       MakeRangeValid(upload_range_start << page_size_log2(), uint32_t(upload_buffer_size), false);
+-      std::memcpy(upload_buffer_mapping,
+-                  memory().TranslatePhysical(upload_range_start << page_size_log2()),
+-                  upload_buffer_size);
++      CopyPagesForUpload(upload_range_start, uint32_t(upload_buffer_size >> page_size_log2()),
++                         upload_buffer_mapping);
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+-- 
+2.47.3
+

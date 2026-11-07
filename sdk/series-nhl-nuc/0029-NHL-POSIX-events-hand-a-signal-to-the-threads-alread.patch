@@ -1,0 +1,291 @@
+From 682c42ea72df32016e4f1881f253ec1127dc7acd Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 18:28:37 +0100
+Subject: [PATCH 29/41] NHL: POSIX events hand a signal to the threads already
+ waiting; SignalAndWait registers the wait first
+
+Waiters queue on the event: an auto-reset signal goes to the oldest waiter, a manual-reset set releases all of
+them even if a reset follows, and SignalAndWait can't lose its wakeup. Same two bugs as rexglue PR 531, written
+independently from its description, without nesting the two objects' locks.
+
+---
+ src/core/threading_posix.cpp | 177 ++++++++++++++++++++++++++++-------
+ 1 file changed, 144 insertions(+), 33 deletions(-)
+
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index a6915a4..1dc625c 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -268,6 +268,14 @@ static sem_t* RexCreateAnonymousSemaphore() {
+ }
+ #endif  // __APPLE__
+ 
++// A thread queued on an event. Lives on the waiting thread's stack; guarded by the event's mutex.
++struct PosixEventWaiter {
++  PosixEventWaiter* prev = nullptr;
++  PosixEventWaiter* next = nullptr;
++  bool queued = false;
++  bool released = false;
++};
++
+ class PosixConditionBase {
+  public:
+   PosixConditionBase() {
+@@ -288,6 +296,17 @@ class PosixConditionBase {
+   virtual ~PosixConditionBase() = default;
+   virtual bool Signal() = 0;
+ 
++  // Events hand a signal to the threads waiting when it arrives, like KeSetEvent, so a wait is
++  // registered first: a later arrival can't take the signal, and a reset right after a set doesn't
++  // lose it. false: this object doesn't queue waiters.
++  virtual bool Enqueue(PosixEventWaiter*) { return false; }
++  // Waits for the waiter to be released. On a timeout it stays queued.
++  virtual WaitResult WaitEnqueued(PosixEventWaiter*, std::chrono::milliseconds) {
++    return WaitResult::kFailed;
++  }
++  // Removes the waiter. true: it had already been released, so the wait succeeded.
++  virtual bool Dequeue(PosixEventWaiter*) { return false; }
++
+   WaitResult Wait(std::chrono::milliseconds timeout) {
+     bool executed;
+     auto predicate = [this] { return this->signaled(); };
+@@ -449,7 +468,16 @@ class PosixCondition<Event> : public PosixConditionBase {
+ 
+   bool Signal() override {
+     auto lock = std::unique_lock<std::mutex>(mutex_);
+-    signal_ = true;
++    if (manual_reset_) {
++      signal_ = true;
++      while (waiters_head_) {
++        ReleaseWaiter(waiters_head_);
++      }
++    } else if (waiters_head_) {
++      ReleaseWaiter(waiters_head_);  // Oldest first; the event stays unsignalled.
++    } else {
++      signal_ = true;
++    }
+     cond_.notify_all();
+     return true;
+   }
+@@ -459,7 +487,50 @@ class PosixCondition<Event> : public PosixConditionBase {
+     signal_ = false;
+   }
+ 
++  bool Enqueue(PosixEventWaiter* waiter) override {
++    auto lock = std::unique_lock<std::mutex>(mutex_);
++    waiter->released = false;
++    if (signal_) {
++      waiter->released = true;
++      post_execution();
++      return true;
++    }
++    waiter->queued = true;
++    waiter->prev = waiters_tail_;
++    waiter->next = nullptr;
++    (waiters_tail_ ? waiters_tail_->next : waiters_head_) = waiter;
++    waiters_tail_ = waiter;
++    return true;
++  }
++
++  WaitResult WaitEnqueued(PosixEventWaiter* waiter, std::chrono::milliseconds timeout) override {
++    auto predicate = [waiter] { return waiter->released; };
++    std::unique_lock<std::mutex> lock(mutex_);
++    if (timeout == std::chrono::milliseconds::max()) {
++      cond_.wait(lock, predicate);
++      return WaitResult::kSuccess;
++    }
++    return cond_.wait_for(lock, timeout, predicate) ? WaitResult::kSuccess : WaitResult::kTimeout;
++  }
++
++  bool Dequeue(PosixEventWaiter* waiter) override {
++    auto lock = std::unique_lock<std::mutex>(mutex_);
++    if (waiter->queued) {
++      Unlink(waiter);
++    }
++    return waiter->released;
++  }
++
+  private:
++  void Unlink(PosixEventWaiter* waiter) {
++    (waiter->prev ? waiter->prev->next : waiters_head_) = waiter->next;
++    (waiter->next ? waiter->next->prev : waiters_tail_) = waiter->prev;
++    waiter->queued = false;
++  }
++  void ReleaseWaiter(PosixEventWaiter* waiter) {
++    Unlink(waiter);
++    waiter->released = true;
++  }
+   inline bool signaled() const override { return signal_; }
+   inline void post_execution() override {
+     if (!manual_reset_) {
+@@ -468,6 +539,8 @@ class PosixCondition<Event> : public PosixConditionBase {
+   }
+   bool signal_;
+   const bool manual_reset_;
++  PosixEventWaiter* waiters_head_ = nullptr;
++  PosixEventWaiter* waiters_tail_ = nullptr;
+ };
+ 
+ template <>
+@@ -888,6 +961,10 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     }
+   }
+ 
++  bool HasQueuedUserCallbacks() const {
++    return has_pending_user_callbacks_.load(std::memory_order_acquire);
++  }
++
+   bool DispatchQueuedUserCallbacks() {
+     if (!has_pending_user_callbacks_.load(std::memory_order_acquire)) {
+       return false;
+@@ -1062,6 +1139,13 @@ PosixWaitHandle::~PosixWaitHandle() = default;
+ 
+ thread_local PosixCondition<Thread>* current_thread_condition_ = nullptr;
+ 
++bool CurrentThreadHasUserCallback() {
++  if (!current_thread_condition_) {
++    Thread::GetCurrentThread();
++  }
++  return current_thread_condition_ && current_thread_condition_->HasQueuedUserCallbacks();
++}
++
+ bool DispatchCurrentThreadUserCallback() {
+   if (!current_thread_condition_) {
+     Thread::GetCurrentThread();
+@@ -1162,62 +1246,91 @@ PosixConditionHandle<Event>::PosixConditionHandle(bool manual_reset, bool initia
+ template <>
+ PosixConditionHandle<Thread>::PosixConditionHandle(pthread_t thread) : handle_(thread) {}
+ 
+-WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
+-  auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
+-  if (posix_wait_handle == nullptr) {
++namespace {
++
++// Waits on an object, signalling to_signal (if any) once the wait is registered, without holding
++// the two objects' locks together: two threads signalling each other would deadlock.
++WaitResult WaitAndSignal(PosixConditionBase& condition, PosixConditionBase* to_signal,
++                         bool is_alertable, std::chrono::milliseconds timeout) {
++  struct QueuedWait {
++    PosixConditionBase& condition;
++    PosixEventWaiter waiter;
++    bool enqueued;
++    explicit QueuedWait(PosixConditionBase& c) : condition(c), enqueued(c.Enqueue(&waiter)) {}
++    ~QueuedWait() {
++      if (enqueued) {
++        condition.Dequeue(&waiter);
++      }
++    }
++  } wait(condition);
++
++  if (to_signal && !to_signal->Signal()) {
+     return WaitResult::kFailed;
+   }
++
+   if (!is_alertable) {
+-    return posix_wait_handle->condition().Wait(timeout);
++    if (!wait.enqueued) {
++      return condition.Wait(timeout);
++    }
++    auto result = condition.WaitEnqueued(&wait.waiter, timeout);
++    return result == WaitResult::kTimeout && condition.Dequeue(&wait.waiter) ? WaitResult::kSuccess
++                                                                             : result;
+   }
+ 
+   ScopedAlertableState alertable_state_guard(true);
+   auto deadline = ComputeAlertableDeadline(timeout);
+-
+   while (true) {
++    if (wait.enqueued) {
++      if (CurrentThreadHasUserCallback()) {
++        if (condition.Dequeue(&wait.waiter)) {
++          return WaitResult::kSuccess;
++        }
++        if (DispatchCurrentThreadUserCallback()) {
++          return WaitResult::kUserCallback;
++        }
++        condition.Enqueue(&wait.waiter);
++      }
++      if (HasAlertableTimeoutElapsed(deadline)) {
++        return condition.Dequeue(&wait.waiter) ? WaitResult::kSuccess : WaitResult::kTimeout;
++      }
++      auto result = condition.WaitEnqueued(&wait.waiter, ComputeAlertableWaitTimeout(deadline));
++      if (result != WaitResult::kTimeout) {
++        return result;
++      }
++      continue;
++    }
+     if (DispatchCurrentThreadUserCallback()) {
+       return WaitResult::kUserCallback;
+     }
+     if (HasAlertableTimeoutElapsed(deadline)) {
+       return WaitResult::kTimeout;
+     }
+-    auto result = posix_wait_handle->condition().Wait(ComputeAlertableWaitTimeout(deadline));
++    auto result = condition.Wait(ComputeAlertableWaitTimeout(deadline));
+     if (result != WaitResult::kTimeout) {
+       return result;
+     }
+   }
+ }
+ 
++}  // namespace
++
++WaitResult Wait(WaitHandle* wait_handle, bool is_alertable, std::chrono::milliseconds timeout) {
++  auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(wait_handle);
++  if (posix_wait_handle == nullptr) {
++    return WaitResult::kFailed;
++  }
++  return WaitAndSignal(posix_wait_handle->condition(), nullptr, is_alertable, timeout);
++}
++
+ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal, WaitHandle* wait_handle_to_wait_on,
+                          bool is_alertable, std::chrono::milliseconds timeout) {
+-  auto result = WaitResult::kFailed;
+   auto posix_wait_handle_to_signal = dynamic_cast<PosixWaitHandle*>(wait_handle_to_signal);
+   auto posix_wait_handle_to_wait_on = dynamic_cast<PosixWaitHandle*>(wait_handle_to_wait_on);
+   if (posix_wait_handle_to_signal == nullptr || posix_wait_handle_to_wait_on == nullptr) {
+     return WaitResult::kFailed;
+   }
+-  if (!posix_wait_handle_to_signal->condition().Signal()) {
+-    return WaitResult::kFailed;
+-  }
+-
+-  if (!is_alertable) {
+-    return posix_wait_handle_to_wait_on->condition().Wait(timeout);
+-  }
+-
+-  ScopedAlertableState alertable_state_guard(true);
+-  auto deadline = ComputeAlertableDeadline(timeout);
+-  while (true) {
+-    if (DispatchCurrentThreadUserCallback()) {
+-      return WaitResult::kUserCallback;
+-    }
+-    if (HasAlertableTimeoutElapsed(deadline)) {
+-      return WaitResult::kTimeout;
+-    }
+-    result = posix_wait_handle_to_wait_on->condition().Wait(ComputeAlertableWaitTimeout(deadline));
+-    if (result != WaitResult::kTimeout) {
+-      return result;
+-    }
+-  }
++  return WaitAndSignal(posix_wait_handle_to_wait_on->condition(),
++                       &posix_wait_handle_to_signal->condition(), is_alertable, timeout);
+ }
+ 
+ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[], size_t wait_handle_count,
+@@ -1260,11 +1373,9 @@ class PosixEvent : public PosixConditionHandle<Event> {
+   ~PosixEvent() override = default;
+   void Set() override { handle_.Signal(); }
+   void Reset() override { handle_.Reset(); }
++  // Signal releases the threads already waiting, so nothing has to run before the reset.
+   void Pulse() override {
+-    using namespace std::chrono_literals;
+     handle_.Signal();
+-    MaybeYield();
+-    Sleep(10us);
+     handle_.Reset();
+   }
+ };
+-- 
+2.47.3
+

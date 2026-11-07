@@ -1,0 +1,46 @@
+From 2b1988c5008762981a5b0b92d0b99094eaed9c31 Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 11:02:35 +0100
+Subject: [PATCH 34/41] vulkan: nhl_test_skip_dump, a ceiling for resolving
+ without the EDRAM dump
+
+---
+ src/graphics/vulkan/render_target_cache.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index fdc78bf..d620153 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -50,6 +50,10 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ REXCVAR_DEFINE_BOOL(nhl_force_host_msaa_1x, false, "GPU",
+                     "NHL performance mode: 1-sample host render targets for 2x/4x guest MSAA "
+                     "(no anti-aliasing, less GPU work); host render target path only");
++REXCVAR_DEFINE_BOOL(nhl_test_skip_dump, false, "GPU/Vulkan",
++                    "Test only: resolves skip the EDRAM dump and copy stale data, a ceiling for "
++                    "what resolving without the dump can gain. The picture will be wrong.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(nhl_dump_only_sample, false, "GPU/Vulkan",
+                     "Resolves: dump only the sample a fast copy reads from multisampled targets")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -1339,7 +1343,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+           nhl_dump_only_sample_msaa_ = nhl_msaa;
+           nhl_dump_only_sample_ = 1 + (((first >> 1) & 1) | (((first >> 0) & 1) << 1));
+         }
+-        if (REXCVAR_GET(direct_host_resolve)) {
++        if (REXCVAR_GET(direct_host_resolve) && !REXCVAR_GET(nhl_test_skip_dump)) {
+           direct_resolved =
+               TryResolveCopyDirectly(resolve_info, copy_shader, draw_resolution_scaled);
+           if (direct_resolved) {
+@@ -1348,7 +1352,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
+             ++direct_resolve_fallback_count_;
+           }
+         }
+-        if (!direct_resolved) {
++        if (!direct_resolved && !REXCVAR_GET(nhl_test_skip_dump)) {
+           // Dump the current contents of the render targets owning the affected
+           // range to edram_buffer_.
+           uint32_t dump_base;
+-- 
+2.47.3
+

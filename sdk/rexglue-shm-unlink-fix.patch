@@ -1,0 +1,28 @@
+From 834635d5b5baf637cd3245c50ee88c43606d4292 Mon Sep 17 00:00:00 2001
+From: nhl <nhl@localhost>
+Date: Fri, 30 Oct 2026 18:29:22 +0100
+Subject: [PATCH] NHL fix: shm_unlink the guest memory mapping right after
+ creation (no /dev/shm leak on kill)
+
+---
+ src/core/memory_posix.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index b52bf39..5240a54 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -483,6 +483,10 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
+     shm_unlink(full_path.c_str());
+     return kFileMappingHandleInvalid;
+   }
++  // NHL: the mapping is only ever used through this fd, so drop the name right away.
++  // Otherwise a killed process (benchmark pkill, crash, hard-exit) leaves its multi-GB
++  // guest memory in /dev/shm until reboot - on the NUC that filled 15 GB of RAM.
++  shm_unlink(full_path.c_str());
+   return static_cast<FileMappingHandle>(ret);
+ #endif
+ }
+-- 
+2.47.3
+
