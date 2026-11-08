@@ -4,6 +4,7 @@ Patches against [rexglue-sdk](https://github.com/rexglue/rexglue-sdk) commit `c9
 
 - `series-nhl-nuc/`: the ordered series (one patch per change), `series-nhl-nuc` lists the order.
 - `rexglue-nhl-nuc-combined.patch`: the whole series as one patch (checked to apply to a clean `c94f5eb`).
+- `pending/`: two default-off experiments exported from a working tree, not part of the series (see its README).
 - the other `rexglue-*.patch` files: earlier single patches kept for history (macOS FSI/tiling fixes by Redth, diagnostics).
 
 **Licence and attribution.** rexglue-sdk is Copyright (c) 2026 Tom Clay and derived from Xenia (Copyright (c) 2022 Ben Vanik and

@@ -1,7 +1,7 @@
 From 1a9492789582e000a9db3fc3e475000d8abfa3ea Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 03:39:23 +0100
-Subject: [PATCH 20/41] NHL diag: render-pass ends and barriers by phase/origin
+Subject: [PATCH 20/42] NHL diag: render-pass ends and barriers by phase/origin
  ([nhl-rpends], [nhl-barriers])
 
 ---

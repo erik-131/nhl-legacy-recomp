@@ -2,7 +2,9 @@
 // See loose_tree_device.h.
 
 #include "loose_tree_device.h"
+#include "mod_layers.h"
 #include "quick_start.h"
+#include "vp6_bridge.h"
 
 // The file itself uses only <filesystem>/<fstream>; the windows.h include is a
 // leftover, so it stays Windows-only rather than needing a POSIX equivalent.
@@ -177,6 +179,21 @@ class LooseTreeEntry final : public fs::Entry {
       *out_file = new HostFile(desired_access, this, host_);
       return X_STATUS_SUCCESS;
     }
+    // Mod layer for opens relative to a directory handle (they bypass UnionDevice::ResolvePath): the winning mod's file
+    // is served instead of the stock one.
+    if (auto* dev = static_cast<LooseTreeDevice*>(device_); dev->mods()) {
+      if (const auto* hit = dev->mods()->Resolve(path())) {
+        std::error_code mec;
+        const auto msz = std::filesystem::file_size(hit->host, mec);
+        if (!mec) {
+          size_ = static_cast<size_t>(msz);
+          allocation_size_ = size_;
+          if (EndsWithCi(name_, ".db")) REXLOG_INFO("[db-open] {} ({} bytes) <- {} (mod)", path(), size_, hit->host.string());
+          *out_file = new HostFile(desired_access, this, hit->host);
+          return X_STATUS_SUCCESS;
+        }
+      }
+    }
     // Diagnostic (NHL_LOG_ASSET_OPENS): log every loose asset the guest opens by
     // its logical cache: path + size. Used to observe which assets a frontend
     // picker actually enumerates -- e.g. walking the Create/Edit Player stick
@@ -222,6 +239,7 @@ class LooseTreeEntry final : public fs::Entry {
     // opens so the bridge (src/vp6_bridge.cpp) can decode the same movie with
     // a host decoder. See docs/vp6-fork-investigation.md.
     if (EndsWithCi(name_, ".vp6")) {
+      Vp6BridgeNoteOpen(host_.string().c_str());
 #ifdef _WIN32
       SetEnvironmentVariableA("NHL_VP6_LAST_OPEN_HOST",
                               host_.string().c_str());
@@ -233,7 +251,7 @@ class LooseTreeEntry final : public fs::Entry {
     // TEMP diagnostic: log .db opens so we can see which databases the game
     // loads (and when) and confirm a grown DB is served. Remove after testing.
     if (EndsWithCi(name_, ".db")) {
-      REXLOG_INFO("[db-open] {} ({} bytes)", path(), size_);
+      REXLOG_INFO("[db-open] {} ({} bytes) <- {}", path(), size_, host_.string());
     }
 #if NHLLEGACY_HAVE_RX2FFI
     if (EndsWithCi(name_, ".rx2")) {

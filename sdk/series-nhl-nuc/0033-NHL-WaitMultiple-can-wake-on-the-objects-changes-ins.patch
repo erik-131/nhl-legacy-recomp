@@ -1,7 +1,7 @@
 From 57a1dfe631a72c5517936cf75f48a38e00722096 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 05:48:05 +0100
-Subject: [PATCH 33/41] NHL: WaitMultiple can wake on the objects' changes
+Subject: [PATCH 33/42] NHL: WaitMultiple can wake on the objects' changes
  instead of polling every 1 ms (nhl_wait_multiple_notify, off), REX_WAIT_STATS
 
 ~570 calls and ~1800 sleeps per second in gameplay. A/B in one match, also on two E-cores: no fps or CPU change.

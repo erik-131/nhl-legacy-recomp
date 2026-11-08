@@ -1,7 +1,7 @@
 From 590edd6a53f32731c83ddf3f15d5c7e7691e3fd9 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 01:33:12 +0100
-Subject: [PATCH 40/41] vulkan: fused direct resolve (nhl_direct_resolve_fused,
+Subject: [PATCH 40/42] vulkan: fused direct resolve (nhl_direct_resolve_fused,
  default off), verify mode, stats, poison; bit-exact on 480 resolves
 
 ---

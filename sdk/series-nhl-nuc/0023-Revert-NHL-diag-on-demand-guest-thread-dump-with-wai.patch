@@ -1,7 +1,7 @@
 From c96d33727a8c630295751e0c60adaae7f7417c26 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 05:30:08 +0100
-Subject: [PATCH 23/41] Revert "NHL diag: on-demand guest thread dump with wait
+Subject: [PATCH 23/42] Revert "NHL diag: on-demand guest thread dump with wait
  handles + guest call chains (NHL_STALL_DUMP_FILE)"
 
 This reverts commit c0568805e6c55798ad1227545ab023cd9e141115.

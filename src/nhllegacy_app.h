@@ -68,7 +68,9 @@ inline void SetEnv(const char* name, const char* value) {
 #include <rex/ui/imgui_drawer.h>     // OnCreateDialogs param
 #include "renderer/core/nhl_vk_backend.h"
 #include "renderer/core/nhl_overlay.h"
+#include "vp6_bridge.h"
 #include "renderer/core/nhl_settings.h"
+#include "roster_choice.h"
 #endif
 #include "tools/replay/src/image_dump.h"
 #include "tools/replay/src/xtr_player.h"
@@ -647,8 +649,21 @@ class NhllegacyApp : public rex::ReXApp {
       // once into an in-memory index; a missing mods/ dir costs nothing.
       {
         const std::filesystem::path mods_root = std::filesystem::path(rex::filesystem::GetExecutableFolder()) / "mods";
+        // Roster set (docs/roster-choice.md): mods/roster-<name>/ are mutually exclusive; env NHL_ROSTERS, else
+        // nhl_enhancements.ini "rosters", picks one; "original", unset or any problem leaves the stock DB.
+        std::string wanted;
+        if (const char* e = std::getenv("NHL_ROSTERS")) wanted = e;
+        else wanted = nhl::LoadString("rosters", "");
+        const auto rd = nhllegacy::rosters::Decide(mods_root, loose_root / "db" / "nhlng.db", wanted);
+        REXLOG_INFO("[nhl-rosters] choice '{}': using {}{}{}", rd.wanted, rd.active == "original" ? "the original rosters" : "set ",
+                    rd.active == "original" ? "" : rd.active, rd.note.empty() ? "" : " -- " + rd.note);
+        {  // a hand-placed cache/guest/db/nhlng.db sits above the mod layer and would hide the chosen set (docs/roster-choice.md)
+          std::error_code sec;
+          if (std::filesystem::exists(cache_dir / "db" / "nhlng.db", sec))
+            REXLOG_WARN("[nhl-rosters] {} exists and shadows the roster choice; remove it", (cache_dir / "db" / "nhlng.db").string());
+        }
         auto idx = std::make_shared<const nhllegacy::mods::ModIndex>(nhllegacy::mods::ModIndex::Scan(
-            mods_root, [](const std::string& l) { REXLOG_INFO("{}", l); }));
+            mods_root, [](const std::string& l) { REXLOG_INFO("{}", l); }, rd.force_disabled));
         if (!idx->mods().empty()) for (const auto& l : idx->Manifest()) REXLOG_INFO("{}", l);
         ud->SetMods(std::move(idx));
       }
@@ -891,6 +906,30 @@ class NhllegacyApp : public rex::ReXApp {
           std::snprintf(name, sizeof(name), "shot_%us.png", t);
           CaptureFrameToPng(name);
           DumpResolveTargets();
+        }
+      }).detach();
+    }
+    // NHL_SHOT_ON_VP6=<count>,<interval_ms>,<max_bursts>: each time a (non-arena-TV) movie
+    // starts publishing (a wipe/transition), capture <count> frames <interval_ms> apart to
+    // wipe_<burst>_<k>.png (the first one at once). Stops after <max_bursts> bursts.
+    if (const char* s = std::getenv("NHL_SHOT_ON_VP6"); s && *s) {
+      unsigned cnt = 8, iv = 150, maxb = 30;
+      std::sscanf(s, "%u,%u,%u", &cnt, &iv, &maxb);
+      std::thread([this, cnt, iv, maxb]() {
+        uint32_t seen = Vp6BridgeBurstCount(), done = 0;
+        for (;;) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          const uint32_t now = Vp6BridgeBurstCount();
+          if (now == seen) continue;
+          seen = now;
+          if (done++ >= maxb) return;
+          for (unsigned k = 0; k < cnt; ++k) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "wipe_%03u_%02u.png", done, k);
+            CaptureFrameToPng(name);
+            std::this_thread::sleep_for(std::chrono::milliseconds(iv));
+          }
+          seen = Vp6BridgeBurstCount();
         }
       }).detach();
     }

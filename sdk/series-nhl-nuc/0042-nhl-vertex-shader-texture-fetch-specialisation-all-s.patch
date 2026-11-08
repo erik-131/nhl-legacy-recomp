@@ -1,0 +1,296 @@
+From 1af2842ea3d6eba195deab9173bd10b746a1f30a Mon Sep 17 00:00:00 2001
+From: Erik <erik-131@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 07:24:17 +0100
+Subject: [PATCH 42/42] nhl: vertex shader texture-fetch specialisation
+ (all-signed / all-unsigned bone textures, nhl_vs_texture_unsigned_spec),
+ nhl_fast_vertex_math hot reload, vertex.nhl_flags, replay measurement cvars
+ (tiny scissor, trivial VS, no VS fetch/tfetch/vfetch),
+ REX_NHL_NO_ROBUST_BUFFER_ACCESS, texture load trace (all default off)
+
+---
+ .../pipeline/shader/spirv_translator.h        | 17 ++++-
+ .../pipeline/shader/spirv_translator_alu.cpp  |  9 ++-
+ .../shader/spirv_translator_fetch.cpp         | 14 ++++
+ src/graphics/pipeline/texture/cache.cpp       |  5 ++
+ src/graphics/vulkan/command_processor.cpp     |  8 +++
+ src/graphics/vulkan/pipeline_cache.cpp        | 66 +++++++++++++++++++
+ src/ui/vulkan/vulkan_device.cpp               |  7 ++
+ 7 files changed, 123 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index 6bf63b2..fe269f3 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -77,6 +77,12 @@ class SpirvShaderTranslator : public ShaderTranslator {
+       Shader::HostVertexShaderType host_vertex_shader_type : Shader::kHostVertexShaderTypeBitCount;
+       // For domain host vertex shader types only, xenos::TessellationMode.
+       uint32_t tessellation_mode : 2;
++      // NHL flags, chosen at pipeline selection from cvars and the fetch constants (see NhlVsFlags()):
++      // bits 0-2 unused (tried and removed: branchless endian swap, MAD fusion), bit 3 nhl_test_trivial_vs,
++      // bit 4 nhl_test_no_vs_fetch, 6 nhl_test_no_vs_tfetch, 7 nhl_test_no_vs_vfetch (measurement only),
++      // bit 5 every texture the vertex shader fetches is all-unsigned and bit 8 all-signed
++      // (nhl_vs_texture_unsigned_spec), bit 9 nhl_fast_vertex_math.
++      uint32_t nhl_flags : 10;
+     } vertex;
+     struct PixelShaderModification {
+       // uint32_t 0.
+@@ -665,8 +671,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // must be called with absolute values of operands - use GetAbsoluteOperand!
+   bool NhlSkipMultiplyZeroCheck() const;
+   // Pixel shaders only: see Modification::pixel.textures_all_unsigned.
++  // Vertex shaders, nhl_vs_texture_unsigned_spec: every fetched texture has kSigned in all four sign
++  // fields (bone matrices): the signed image is the only one bound/sampled, without any conversion.
++  bool TexturesAllSignedSingleImage() const {
++    return is_vertex_shader() && (GetSpirvShaderModification().vertex.nhl_flags & 256u);
++  }
+   bool TexturesAllUnsigned() const {
+-    return is_pixel_shader() && GetSpirvShaderModification().pixel.textures_all_unsigned;
++    return (is_pixel_shader() && GetSpirvShaderModification().pixel.textures_all_unsigned) ||
++           (is_vertex_shader() && (GetSpirvShaderModification().vertex.nhl_flags & (32u | 256u)));
+   }
+   // Pixel shader experiments, carried in the 4 bits of pixel.param_gen_interpolator, which are free
+   // (always 0) when pixel.param_gen_enable is 0; shaders that use ps_param_gen (VFACE needs signed zero)
+@@ -684,6 +696,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     const auto& px = GetSpirvShaderModification().pixel;
+     return (px.interpolators_centroid & 0x8000u) && !(px.interpolator_mask & 0x8000u);
+   }
++  uint32_t NhlVsFlags() const {
++    return is_vertex_shader() ? GetSpirvShaderModification().vertex.nhl_flags : 0;
++  }
+   bool nhl_infinity_source_seen_ = false;
+   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs, spv::Id operand_1_abs);
+   // Conditionally discard the current fragment. Changes the build point.
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 4517c34..2699cf1 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -22,7 +22,9 @@
+ #include <rex/math.h>
+ 
+ REXCVAR_DEFINE_BOOL(nhl_fast_vertex_math, false, "GPU",
+-                    "Vertex shaders: no 0 * x check where x can't be infinite or NaN");
++                    "Vertex shaders: no 0 * x check where x can't be infinite or NaN (hot reload: part of the "
++                    "vertex shader modification, bit 9 of nhl_flags)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(nhl_fast_pixel_math, false, "GPU",
+                     "Pixel shaders: no 0 * x check where x can't be infinite or NaN (smaller shaders, faster "
+                     "to compile; a texture or constant that is infinite or NaN would then give NaN, not 0)");
+@@ -34,7 +36,7 @@ namespace rex::graphics {
+ // costs several instructions per product, and NHL's skinning shaders have hundreds of products per vertex.
+ bool SpirvShaderTranslator::NhlSkipMultiplyZeroCheck() const {
+   if (nhl_infinity_source_seen_) return false;
+-  return (is_vertex_shader() && REXCVAR_GET(nhl_fast_vertex_math)) ||
++  return (is_vertex_shader() && (NhlVsFlags() & 512u)) ||
+          (is_pixel_shader() && (REXCVAR_GET(nhl_fast_pixel_math) || (NhlPsFlags() & 1)));
+ }
+ 
+@@ -80,6 +82,9 @@ void SpirvShaderTranslator::ProcessAluInstruction(const ParsedAluInstruction& in
+     // Don't even disassemble or update predication.
+     return;
+   }
++  if (is_vertex_shader() && (NhlVsFlags() & 8u)) {
++    return;  // nhl_test_trivial_vs: measurement only, the vertex shader does no work
++  }
+ 
+   UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
+ 
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 62ddc47..40d7b22 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -26,6 +26,9 @@ namespace rex::graphics {
+ 
+ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+     const ParsedVertexFetchInstruction& instr) {
++  if (is_vertex_shader() && (NhlVsFlags() & (24u | 128u))) {
++    return;  // nhl_test_trivial_vs (8: all ucode, 16: all fetches, 128: vertex fetches only)
++  }
+   UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
+ 
+   uint32_t used_result_components = instr.result.GetUsedResultComponents();
+@@ -470,6 +473,9 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+ 
+ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+     const ParsedTextureFetchInstruction& instr) {
++  if (is_vertex_shader() && (NhlVsFlags() & (24u | 64u))) {
++    return;  // nhl_test_trivial_vs (8: all ucode, 16: all fetches, 64: texture fetches only)
++  }
+   UpdateInstructionPredication(instr.is_predicated, instr.predicate_condition);
+ 
+   EnsureBuildPointAvailable();
+@@ -2240,6 +2246,11 @@ void SpirvShaderTranslator::SampleTexture(spv::Builder::TextureParameters& textu
+   const bool all_unsigned = TexturesAllUnsigned();
+   if (all_unsigned) {
+     // Only the unsigned image is ever sampled: no conditions, no merge phis.
++    // (nhl_vs_texture_unsigned_spec, all signed: the signed image, taken as is.)
++    if (TexturesAllSignedSingleImage()) {
++      image_unsigned = image_signed;
++      lerp_first_unsigned = lerp_first_signed;
++    }
+     texture_parameters.sampler = builder_->createBinOp(
+         spv::OpSampledImage, builder_->makeSampledImageType(builder_->getTypeId(image_unsigned)),
+         image_unsigned, sampler);
+@@ -2297,6 +2308,9 @@ spv::Id SpirvShaderTranslator::QueryTextureLod(spv::Builder::TextureParameters&
+                                                spv::Id image_unsigned, spv::Id image_signed,
+                                                spv::Id sampler, spv::Id is_all_signed) {
+   if (TexturesAllUnsigned()) {
++    if (TexturesAllSignedSingleImage()) {
++      image_unsigned = image_signed;
++    }
+     texture_parameters.sampler = builder_->createBinOp(
+         spv::OpSampledImage, builder_->makeSampledImageType(builder_->getTypeId(image_unsigned)),
+         image_unsigned, sampler);
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index fa942f6..a684607 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -494,6 +494,11 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+                                          pending_load.load_mips ? "mips" : "base")];
+     ++st.loads;
+     st.bytes += bytes;
++    if (std::getenv("REX_NHL_TEX_TRACE") && nhl_resolved) {
++      REXGPU_INFO("[nhl-textrace] load RES base={:08X} {}x{} {} {}KB", texture_key.base_page << 12,
++                  texture_key.GetWidth(), texture_key.GetHeight(),
++                  FormatInfo::Get(texture_key.format)->name, bytes >> 10);
++    }
+     static auto window_start = std::chrono::steady_clock::now();
+     const auto now = std::chrono::steady_clock::now();
+     if (now - window_start >= std::chrono::seconds(1)) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index aed1642..2714fac 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -59,6 +59,10 @@
+ REXCVAR_DEFINE_BOOL(nhl_test_half_scissor, false, "GPU/Vulkan",
+                     "Measurement only: draw half the pixels, to tell pixel from vertex cost")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_test_tiny_scissor, false, "GPU/Vulkan",
++                    "Measurement only: scissor every draw to 1x1 pixel (vertex, setup and state cost stay, "
++                    "pixel shading and ROP go): the draw time left is the non-pixel cost")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(nhl_test_skip_tile_b, false, "GPU/Vulkan",
+                     "Measurement only: skip every draw of the second predicated-tiling pass (window x offset "
+                     "!= 0, 640 pitch targets). Gives the upper bound of what a perfect tile merge could save; "
+@@ -3928,6 +3932,10 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor_in) {
+   if (REXCVAR_GET(nhl_test_half_scissor)) {
+     scissor.extent.height /= 2;
+   }
++  if (REXCVAR_GET(nhl_test_tiny_scissor)) {
++    scissor.extent.width = scissor.extent.width ? 1 : 0;
++    scissor.extent.height = scissor.extent.height ? 1 : 0;
++  }
+   if (!dynamic_scissor_update_needed_) {
+     dynamic_scissor_update_needed_ |= dynamic_scissor_.offset.x != scissor.offset.x;
+     dynamic_scissor_update_needed_ |= dynamic_scissor_.offset.y != scissor.offset.y;
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 6d473dd..adf8b53 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -76,6 +76,26 @@ REXCVAR_DEFINE_BOOL(nhl_ps_fast_math, false, "GPU/Vulkan",
+                     "Like nhl_fast_pixel_math (no 0 * x check in pixel shaders while no rcp/rsq/log was seen) but "
+                     "hot reload with its own cached translation, so it works with NHL_AB_TOGGLE")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DECLARE(bool, nhl_fast_vertex_math);
++REXCVAR_DEFINE_BOOL(nhl_test_trivial_vs, false, "GPU/Vulkan",
++                    "Measurement only: vertex shaders run no guest instructions (all-zero outputs), so the "
++                    "draw time left is the fixed per-draw cost; the picture is wrong")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_test_no_vs_fetch, false, "GPU/Vulkan",
++                    "Measurement only: vertex shaders skip their vertex and texture fetches (zeros instead), "
++                    "to tell the fetch cost from the ALU cost; the picture is wrong")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_vs_texture_unsigned_spec, false, "GPU/Vulkan",
++                    "Vertex shaders: if every texture the shader fetches (bone matrices etc.) has kUnsigned in "
++                    "all four sign fields, translate the fetches without the signed/biased/gamma code and "
++                    "without the second (signed) image sample. Hot reload (own cached translation)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_test_no_vs_tfetch, false, "GPU/Vulkan",
++                    "Measurement only: vertex shaders skip their texture fetches (bone matrices), zeros instead")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(nhl_test_no_vs_vfetch, false, "GPU/Vulkan",
++                    "Measurement only: vertex shaders skip their vertex fetches, zeros instead")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(nhl_ps_implicit_lod, false, "GPU/Vulkan",
+                     "Plain 2D texture fetches in pixel shaders with computed LOD use the hardware's implicit "
+                     "derivatives plus a LOD bias (sample_b) instead of explicit coarse gradients scaled by "
+@@ -954,6 +974,52 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
+           host_vertex_shader_type));
+ 
+   modification.vertex.interpolator_mask = interpolator_mask;
++  modification.vertex.nhl_flags =
++      (REXCVAR_GET(nhl_test_trivial_vs) ? 8u : 0u) |
++      (REXCVAR_GET(nhl_test_no_vs_fetch) ? 16u : 0u) |
++      (REXCVAR_GET(nhl_test_no_vs_tfetch) ? 64u : 0u) | (REXCVAR_GET(nhl_test_no_vs_vfetch) ? 128u : 0u) |
++      (REXCVAR_GET(nhl_fast_vertex_math) ? 512u : 0u);
++  if (REXCVAR_GET(nhl_vs_texture_unsigned_spec)) {
++    bool all_unsigned = true, all_signed = true;
++    for (const auto& binding : shader.texture_bindings()) {
++      const uint32_t signs = (regs.GetTextureFetch(binding.fetch_constant).dword_0 >> 2) & 0xFFu;
++      all_unsigned &= signs == 0;
++      all_signed &= signs == 0x55;  // kSigned (1) in all four fields
++    }
++    if (shader.texture_bindings().empty()) {
++      all_signed = false;
++    }
++    modification.vertex.nhl_flags |= all_unsigned ? 32u : (all_signed ? 256u : 0u);
++    if (std::getenv("REX_NHL_VS_TEX_LOG")) {
++      static std::mutex log_mutex;
++      static std::unordered_set<uint64_t> log_seen;
++      std::lock_guard<std::mutex> log_lock(log_mutex);
++      for (const auto& binding : shader.texture_bindings()) {
++        const auto f = regs.GetTextureFetch(binding.fetch_constant);
++        uint64_t key = (uint64_t(f.dword_0) << 32 | f.dword_1) ^ (uint64_t(f.dword_2) * 0x9E3779B97F4A7C15ull) ^ binding.fetch_constant;
++        if (!log_seen.insert(key).second) continue;
++        REXGPU_INFO("[nhl-vstex] vs={:016X} fc={} dims={} instr_dim={} words {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} filters mag={} min={} mip={} aniso={}",
++                    shader.ucode_data_hash(), binding.fetch_constant, uint32_t(f.dimension),
++                    uint32_t(binding.fetch_instr.dimension), f.dword_0, f.dword_1, f.dword_2, f.dword_3,
++                    f.dword_4, f.dword_5, uint32_t(binding.fetch_instr.attributes.mag_filter),
++                    uint32_t(binding.fetch_instr.attributes.min_filter),
++                    uint32_t(binding.fetch_instr.attributes.mip_filter),
++                    uint32_t(binding.fetch_instr.attributes.aniso_filter));
++      }
++    }
++    static std::mutex vs_spec_mutex;
++    static std::unordered_set<uint64_t> vs_spec_seen;
++    static uint32_t vs_spec_total = 0, vs_spec_unsigned = 0, vs_spec_signed = 0, vs_spec_with_tex = 0;
++    std::lock_guard<std::mutex> lock(vs_spec_mutex);
++    if (vs_spec_seen.insert(shader.ucode_data_hash() * 0x9E3779B97F4A7C15ull ^ uint64_t(all_unsigned)).second) {
++      ++vs_spec_total;
++      vs_spec_unsigned += all_unsigned;
++      vs_spec_signed += all_signed;
++      vs_spec_with_tex += !shader.texture_bindings().empty();
++      REXGPU_INFO("[nhl-spec] vs all-unsigned {} all-signed {} of {} translations ({} with texture fetches)",
++                  vs_spec_unsigned, vs_spec_signed, vs_spec_total, vs_spec_with_tex);
++    }
++  }
+   if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
+     modification.vertex.tessellation_mode = uint32_t(regs.Get<reg::VGT_HOS_CNTL>().tess_mode);
+   } else {
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..cbe369f 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
+ #include <algorithm>
+ #include <cstring>
+ #include <string>
+@@ -628,6 +629,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+ 
+   if (with_gpu_emulation) {
+     XE_UI_VULKAN_FEATURE(robustBufferAccess)
++    if (std::getenv("REX_NHL_NO_ROBUST_BUFFER_ACCESS")) {
++      // Experiment: without robustness the driver may vectorize the shaders' consecutive dword loads.
++      enabled_features.robustBufferAccess = VK_FALSE;
++      device->properties_.robustBufferAccess = false;
++      REXLOG_INFO("[nhl] robustBufferAccess disabled (REX_NHL_NO_ROBUST_BUFFER_ACCESS)");
++    }
+     XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
+     XE_UI_VULKAN_FEATURE(independentBlend)
+     XE_UI_VULKAN_FEATURE(geometryShader)
+-- 
+2.47.3
+

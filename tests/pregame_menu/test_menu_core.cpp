@@ -127,6 +127,16 @@ static void TestApply() {
     ApplyAll(opts, init, r5, &init);
     CHECK(r5.ini.size() == 1 && r5.ini["supersampling"] == "2");
   }
+  {  // roster set: 2026 writes the ini key, moving back to Original erases it (docs/roster-choice.md)
+    Settings rs(opts); rs.SetIndex(Opt("rosters"), 1);
+    Rec ra; ApplyAll(opts, rs, ra);
+    CHECK(ra.ini["rosters"] == "2026");
+    Settings back(opts);
+    Rec rb; ApplyAll(opts, back, rb, &rs);
+    CHECK(rb.ini.count("rosters") == 1 && rb.ini["rosters"].empty());
+    Rec rc; ApplyAll(opts, back, rc);
+    CHECK(rc.ini.count("rosters") == 0);                   // untouched default leaves the ini alone
+  }
   CHECK(r2.env.count("REX_NHL_FENCE_POLL") == 0 && rep.env_kept == 1);
   CHECK(r.env.count("REX_NHL_NO_REPLAY_SHADOWS") == 0);   // default On: nothing exported
   {
@@ -221,8 +231,8 @@ static void TestScrollAndTimeout() {
   MenuConfig cfg; cfg.visible_rows = 2; cfg.auto_start_ms = 5000;
   Menu m(opts, Settings(opts), cfg);
   uint64_t t = 0;
-  Tap(m, kDown, t); Tap(m, kDown, t);                      // third row of the Start page
-  CHECK(m.cursor() == 2 && m.scroll() == 1);
+  for (int i = 0; i < 6; ++i) Tap(m, kDown, t);            // last row of the Start page (boot, show, legal, lang, fill, rosters, reset)
+  CHECK(m.cursor() == 6 && m.scroll() == 5);
   View v = BuildView(m, t);
   CHECK(v.rows.size() == 2 && v.more_above && !v.more_below && v.rows.back().selected);
   CHECK(v.countdown_s >= 4);
@@ -281,9 +291,74 @@ static void TestWrap() {
   CHECK(Tap(m, kStart, t) == Outcome::StartGame);
 }
 
+static void TestBootRows() {
+  const auto& opts = DefaultOptions();
+  Settings s(opts);
+  Rec none; ApplyAll(opts, s, none);
+  CHECK(none.env.count("REX_NHL_SKIP_LEGAL") == 0 && none.env.count("REX_NHL_SKIP_LANGUAGE") == 0 && none.env.count("REX_NHL_MANUAL_LINES") == 0);
+  s.SetIndex(Opt("legal"), 1); s.SetIndex(Opt("lang"), 1); s.SetIndex(Opt("manual_lines"), 1);
+  Rec r; ApplyAll(opts, s, r);
+  CHECK(r.env["REX_NHL_SKIP_LEGAL"] == "true" && r.env["REX_NHL_SKIP_LANGUAGE"] == "true" && r.env["REX_NHL_MANUAL_LINES"] == "true");
+  CHECK(Opt("legal").page == "Start" && Opt("lang").page == "Start" && Opt("manual_lines").page == "Advanced");
+  CHECK(Opt("replay_shadows").def == 0 && Opt("replay_shadows").choices[0].assigns.empty());  // default = engine default
+  Settings t(opts); CHECK(t.ParseText(s.ToText()) == 0 && t == s);
+}
+
+static void TestFill() {
+  const auto& opts = DefaultOptions();
+  const Option& fill = Opt("fill");
+  CHECK(fill.oneshot && fill.def == 0 && fill.choices.size() == 3);
+  // script generator: deterministic, bounded, starts with the quick-start presses
+  const std::string a = FillScript(10, 1), b = FillScript(10, 1), c = FillScript(10, 2);
+  CHECK(a == b && a != c);
+  CHECK(a.rfind("14:a:120,16:a:120", 0) == 0 && a.find("28:start:120") != std::string::npos);
+  CHECK(FillScript(0, 1).empty() && FillScript(-5, 1).empty());
+  double last = 0; int n = 0; bool order = true, only_known = true;
+  const char* names[] = {"a", "start", "b", "up", "down", "left", "right", "lb", "rb"};
+  size_t pos = 0;
+  while (pos <= a.size()) {
+    size_t e = a.find(',', pos); if (e == std::string::npos) e = a.size();
+    const std::string it = a.substr(pos, e - pos); pos = e + 1;
+    const size_t c1 = it.find(':'), c2 = it.find(':', c1 + 1);
+    const double t = std::atof(it.substr(0, c1).c_str());
+    const std::string nm = it.substr(c1 + 1, c2 - c1 - 1);
+    bool known = false; for (auto* k : names) known |= nm == k;
+    only_known &= known; order &= t >= last; last = t; ++n;
+  }
+  CHECK(order && only_known && last < 600 - 20 + 0.01 && last > 540 && n > 200 && n < 450);
+  CHECK(FillScript(30, 1).size() > 2 * FillScript(10, 1).size() / 1);
+  // applying the 30 min choice: script, exit timer, mute; the 'no' choice exports none of them
+  Settings s(opts);
+  Rec none; ApplyAll(opts, s, none);
+  CHECK(none.env.count("NHL_VPAD_SCRIPT") == 0 && none.env.count("NHL_VPAD_EXIT_AFTER_SEC") == 0 && none.env.count("REX_AUDIO_MUTE") == 0);
+  s.SetIndex(fill, 2);
+  Rec r; ApplyAll(opts, s, r);
+  CHECK(r.env["NHL_VPAD_EXIT_AFTER_SEC"] == "1800" && r.env["REX_AUDIO_MUTE"] == "true");
+  CHECK(r.env["NHL_VPAD_SCRIPT"] == FillScript(30, 1));
+  Rec pre; pre.preset.insert("NHL_VPAD_SCRIPT"); ApplyAll(opts, s, pre);  // a script already set by the launcher wins
+  CHECK(pre.env.count("NHL_VPAD_SCRIPT") == 0 && pre.env.count("NHL_VPAD_EXIT_AFTER_SEC") == 1);
+  // one-shot: not stored
+  s.SetIndex(Opt("msaa"), 1);
+  Settings keep = s; keep.ResetOneShots();
+  CHECK(keep.IsDefault(fill) && !keep.IsDefault(Opt("msaa")) && keep.ToText().find("fill") == std::string::npos);
+  Settings reload(opts); reload.ParseText(s.ToText());      // a hand-edited file still works for one start
+  CHECK(reload.Index(fill) == 2);
+  // navigation: the row sits on the Start tab and cycles with A and Right
+  Menu m(opts, Settings(opts));
+  uint64_t t = 0;
+  for (int i = 0; i < 4; ++i) Tap(m, kDown, t);
+  CHECK(m.PageOptions()[m.cursor()]->id == "fill");
+  Tap(m, kA, t); CHECK(m.settings().Index(fill) == 1);
+  Tap(m, kRight, t); CHECK(m.settings().Index(fill) == 2);
+  const View v = BuildView(m, t);
+  CHECK(v.rows[m.cursor()].changed && v.warn.find("THIS profile") != std::string::npos);
+  for (const auto& l : RenderLines(v, 64)) CHECK(l.size() <= 64);
+  Tap(m, kY, t); CHECK(m.settings().IsDefault(fill));
+}
+
 int main() {
   TestModel(); TestSettingsRoundTrip(); TestParseRobustness(); TestFiles(); TestApply();
-  TestNavigation(); TestDiscardAndHeldStart(); TestRepeatAndStick(); TestScrollAndTimeout(); TestView(); TestWrap();
+  TestNavigation(); TestDiscardAndHeldStart(); TestRepeatAndStick(); TestScrollAndTimeout(); TestView(); TestWrap(); TestFill(); TestBootRows();
   std::printf("%d checks, %d failed\n", g_n, g_fail);
   return g_fail ? 1 : 0;
 }

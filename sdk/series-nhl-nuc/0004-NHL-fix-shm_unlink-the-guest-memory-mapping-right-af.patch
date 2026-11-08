@@ -1,7 +1,7 @@
 From 834635d5b5baf637cd3245c50ee88c43606d4292 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 18:29:22 +0100
-Subject: [PATCH 04/41] NHL fix: shm_unlink the guest memory mapping right
+Subject: [PATCH 04/42] NHL fix: shm_unlink the guest memory mapping right
  after creation (no /dev/shm leak on kill)
 
 ---

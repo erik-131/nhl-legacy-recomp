@@ -3,6 +3,7 @@
 # so that the pipeline storage fills before the user plays (a first-seen pipeline freezes play for 50-300 ms;
 # measured 2026-11-06: 12 gaps over 50 ms in two minutes of play on empty storage, 0-1 on a filled one).
 # Usage: nhl_fill.sh [minutes]      Needs a display like the normal launcher (Wolf session or a desktop).
+# The same run can be started from the pre-game menu (Start tab, "Pre-compile shaders (once)", NHL_MENU=1): it exports the same press script plus NHL_VPAD_EXIT_AFTER_SEC.
 # A random 30 min run reaches ~290 pipelines; scenes the presses don't reach (replays, goals, penalties, fights)
 # are added by normal play. Stop with pkill nhllegacy: the storage is flushed as it grows.
 # Uses a scratch copy of nothing: it runs on the user's profile and saves, so it presses buttons in menus too;

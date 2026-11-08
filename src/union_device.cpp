@@ -46,6 +46,7 @@ void UnionDevice::SetMods(std::shared_ptr<const mods::ModIndex> index) {
     if (dev->Initialize()) mod_devs_[i] = std::move(dev);
     else REXLOG_WARN("[nhl-mods] mod '{}' device failed to initialize; its files are skipped", m.id);
   }
+  lower_.SetMods(index);  // opens relative to a directory handle bypass ResolvePath
   mods_ = std::move(index);
 }
 

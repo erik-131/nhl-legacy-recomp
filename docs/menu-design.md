@@ -1,6 +1,6 @@
 # Pre-game settings menu: design (P21, roadmap 4e)
 
-Status 2026-11-07 (worklog 2026-11-06 15:35, 16:20, 16:45): logic written and unit-tested (372 checks); the SDL layer `menu_sdl.cpp` is written, wired into `main()` and **runs on dev with `NHL_MENU=1`** (window ~85 ms after start, draws into the window surface because the bundled SDL3 has no renderer; word wrap, ini keys untouched unless changed, scripted presses and page dumps done). Default off. **Not yet tested with a real pad or keyboard, under Moonlight/Wolf, or with a warning line on screen; not in the playable launcher.** The text below is the original design; steps 3 and 4 of the list near the end are done.
+Status 2026-11-07: logic written and unit-tested (372 checks); the SDL layer `menu_sdl.cpp` is written, wired into `main()` and **runs on dev with `NHL_MENU=1`** (window ~85 ms after start, draws into the window surface because the bundled SDL3 has no renderer; word wrap, ini keys untouched unless changed, scripted presses and page dumps done). Default off. **Scripted-pad run on dev 2026-11-07 (worklog 2026-11-07, menu test); not yet tested with a real pad or keyboard or under Moonlight/Wolf; not in the playable launcher.** The text below is the original design; steps 3 and 4 of the list near the end are done.
 Code: `src/pregame_menu/` (logic only, no SDK/SDL/ImGui includes). Tests: `tools/pregame_menu/run_tests.sh` (258 checks, ASan+UBSan).
 Layout preview without a window: `g++ -std=c++17 src/pregame_menu/menu_core.cpp tests/pregame_menu/demo.cpp -o demo && ./demo "]r"`
 (keys `u d l r a b y [ ] s k`; `--table` prints the option table).
@@ -68,6 +68,9 @@ Defaults equal what `nhl_play.sh` exports today. "Restart" = cannot change while
 | Tab | Option (id) | Choices (default first) | Sets | Restart | Warning / evidence |
 |---|---|---|---|---|---|
 | Start | Boot screens (`boot`) | Quick start / Quick + full intro movie / Normal | `REX_NHL_QUICK_START`, `NHL_BOOT_CLOCK` (3 or 1), `NHL_QUICK_MOVIE_FRAMES` (12 or 365) | yes | Measured 11-06: menu file at 10.3 s (on screen ~12 s) with the 3x clock and 12-frame movie, 14.2 s with the clock only, v ~24-26 s |
+| Start | Pre-compile shaders (`fill`, **one-shot**) | No / Yes next start 10 min / 30 min | `NHL_VPAD_SCRIPT` (generated, `FillScript`), `NHL_VPAD_EXIT_AFTER_SEC`, `REX_AUDIO_MUTE` | yes | The shader storage fill of `nhl_fill.sh` run inside the game process: see "Shader fill row" below |
+| Start | Legal screen (`legal`) | Shown / Hidden | `REX_NHL_SKIP_LEGAL` | yes | Blank clouds instead of the legal text; boot no shorter |
+| Start | Language screen (`lang`) | Shown / Hidden | `REX_NHL_SKIP_LANGUAGE` | yes | Keeps the default language; boot no shorter |
 | Start | Show this menu (`show`) | Always / only when Back held | menu only | no | warns that it is hidden next time |
 | Start | Reset to defaults | action | | | |
 | Performance | Main pass multisampling (`msaa`) | Game 2x / Off 1x | `REX_NHL_FORCE_HOST_MSAA_1X` (cvar `nhl_force_host_msaa_1x`) | yes | Edges more jagged. **Measured 2026-11-06 17:25 (worklog): +14 % median** (2x 101.3/103.4, 1x 118.8/117.1 fps; p5 +10 fps), quick route; the cvar tested is this one. At 1:1 no visible difference, at 2x zoom slightly stair-stepped edges on skates, numbers and the circle line. (The earlier "+23 %" had no source; a 12:01 frame-script round saw +21 % in single runs.) the maintainer agreed it as a menu choice |
@@ -80,12 +83,30 @@ Defaults equal what `nhl_play.sh` exports today. "Restart" = cannot change while
 | Look | Soften shadows (`shadow_soft`) | Off / On | ini `shadow_filter_linear` | yes | |
 | Look | FPS graph (`hud`) | On / Off | `NHL_HUD` | yes | MangoHud |
 | Display | Window (`fullscreen`), Monitor (`monitor`) | window / borderless; default, 1–3 | ini `fullscreen`, `monitor` | yes | |
+| Advanced | Line changes (`manual_lines`) | Game option / Always manual | `REX_NHL_MANUAL_LINES` | yes | Every match starts with manual line changes |
+| Look | Shadows in replays (`replay_shadows`) | On (engine default) / Off | `REX_NHL_NO_REPLAY_SHADOWS=1` | yes | Measured p25 69 -> 101 fps in replays; the replay picture loses shadows |
 | Advanced | Skip pointless RT copies (`transfers`) | On / Off | `REX_NHL_RT_SKIP_OVERWRITTEN_TRANSFERS` | yes | Off is slower (p5 36→60 measured) |
 | Advanced | Upload pre-pass (`prepass`) | On / Off | `REX_NHL_UPLOAD_PREPASS` | yes | Off is slower |
 | Advanced | Re-upload all guest memory (`pagestate`) | Off / On | `REX_CLEAR_MEMORY_PAGE_STATE` | yes | On is slower; for stale geometry only |
 | Advanced | New shaders (`placeholder`) | Wait / Placeholder | `REX_NHL_ASYNC_NO_PLACEHOLDER` true / false | yes | Placeholder: more freezes (P17) |
 
 **Not in the menu yet** (and why): engine tunables (`nhl_tunables.json`) and the input map need the running game or a long list; they stay in the F1 overlay until 4d/3c decide. Colour grade, FidelityFX, shadow softness and vsync exist in the overlay/ini and can be added as rows (one `add()` each, no logic change). Shadows/AO only run outside gameplay (replays, cutscenes) so a "shadow quality" row would not change gameplay fps; do not add one without the frame-script work (1l). Team choice / straight to a match (6b) would be a `Choice` list filled at run time: not built.
+
+## Shader fill row (`fill`)
+The fill route (`tools/nuc/ct105/nhl_fill.sh`) is a normal game run in which the scripted virtual pad (`src/vpad_script.cpp`,
+`NHL_VPAD_SCRIPT`, started in the game process) presses random buttons for N minutes, so the pipeline storage fills. The menu
+runs in the same process before the game starts, so it needs no launcher support: choosing "Yes, next start: 30 min" makes
+`ApplyAll` export the generated press script (`FillScript(minutes, seed)`, same shape as the awk in `nhl_fill.sh`: quick-start
+presses at 14 to 28 s, then a random press every 0.8 to 2.4 s), `REX_AUDIO_MUTE=true` and `NHL_VPAD_EXIT_AFTER_SEC=<minutes*60>`.
+That last variable is new (`StartVpadScript`): the process ends itself with `_exit(0)` after that time (what `timeout` does in
+the shell version; the storage is flushed as it grows, so nothing is lost).
+- **One-shot:** the option has `Option::oneshot`; `menu_sdl` calls `Settings::ResetOneShots()` before saving, so `nhl_pregame.ini`
+  never keeps it and the next start is a normal one. Discard (B) applies nothing of it.
+- **Env wins:** a `NHL_VPAD_SCRIPT` already in the environment (bench scripts, `nhl_fill.sh`) is kept; the exit timer and mute still apply.
+- **No progress hint in the menu:** the window is gone when the fill runs. Progress is visible in the game log
+  (`[nhl-vpad] will exit after N s`, pipeline lines) and by the shader files growing; the run ends with the game closing
+  (in the Wolf session the stream returns to Steam). Needs "Boot screens = Quick start" because the press timing assumes the 3x boot clock.
+- Runs on the player's profile and saves (it presses buttons in menus); see `docs/mods-and-tweaks.md`.
 
 ## Persistence
 `nhl_pregame.ini` next to the exe (same folder as `nhl_enhancements.ini`, `nhl_tunables.json`). Plain `key=value`, `#` comments, `version=1`. **Only non-default choices are stored**, so a later change of a default reaches everyone who never touched the option. Unknown keys are kept on save; a bad value falls back to the default for that one option; a missing file means defaults; write is `path.tmp` then rename. Options that the overlay already persists (`supersampling`, `fullscreen`, `monitor`, `edge_aa_mode`, `swap_post_effect`, `shadow_filter_linear`) are written to `nhl_enhancements.ini` by `Applier::SetIni` at every start, so the overlay and the existing `OnPreSetup` code keep working unchanged and **the menu is the owner of those keys** (a change made in the overlay is overwritten at the next start; either hide the overlay rows or make the overlay write `nhl_pregame.ini`, to decide).

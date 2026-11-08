@@ -1,7 +1,7 @@
 From 4d3d8e98a9c142ffe62b1b1af83131c3990c72ed Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 01:18:46 +0100
-Subject: [PATCH 15/41] NHL: optional 1x host MSAA performance mode
+Subject: [PATCH 15/42] NHL: optional 1x host MSAA performance mode
  (nhl_force_host_msaa_1x, default off)
 
 ---

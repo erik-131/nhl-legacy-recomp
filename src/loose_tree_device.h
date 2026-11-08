@@ -22,8 +22,11 @@
 #include <string_view>
 #include <vector>
 
+#include <memory>
 #include <rex/filesystem/device.h>
 #include <rex/filesystem/entry.h>
+
+namespace nhllegacy::mods { class ModIndex; }
 
 namespace nhllegacy {
 
@@ -55,6 +58,12 @@ class LooseTreeDevice : public rex::filesystem::Device {
   std::shared_ptr<const std::vector<uint8_t>> BuildSynth(
       const std::string& rel, const std::filesystem::path& original);
 
+  // User mod layer (src/mod_layers.h). The guest opens most files relative to a directory handle, which never goes through
+  // UnionDevice::ResolvePath, so the mod index is also consulted here, when a file of the loose tree is opened: a mod's
+  // file is served instead of the stock one. Set once before the guest runs (not locked).
+  void SetMods(std::shared_ptr<const mods::ModIndex> index) { mods_ = std::move(index); }
+  const mods::ModIndex* mods() const { return mods_.get(); }
+
   const std::filesystem::path& override_root() const { return override_root_; }
   std::mutex& synth_mutex() { return synth_mu_; }
 
@@ -64,6 +73,7 @@ class LooseTreeDevice : public rex::filesystem::Device {
   std::filesystem::path override_root_;
   std::unique_ptr<rex::filesystem::Entry> root_;
   std::mutex synth_mu_;
+  std::shared_ptr<const mods::ModIndex> mods_;
 };
 
 }  // namespace nhllegacy

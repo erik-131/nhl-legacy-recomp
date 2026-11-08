@@ -9,6 +9,8 @@ api() { sudo curl -s --unix-socket "$S" "$@"; }
 steam_c() { docker ps --format '{{.Names}}' | grep -i steam | head -1 || true; }
 case "${1:-status}" in
 start)
+  # serialise concurrent starts (several bq jobs used to race here and create two lobbies)
+  exec 9>"${NHL_WORK:-$HOME/nhl-work}/wolf-start.lock"; flock 9
   [ -n "$(steam_c)" ] && { echo "already running: $(steam_c)"; exit 0; }
   # Wolf mounts <home>/udev; it can go missing when a Moonlight tile sharing this home stops.
   sudo mkdir -p /etc/wolf/profile-data/user/WolfSteam/udev

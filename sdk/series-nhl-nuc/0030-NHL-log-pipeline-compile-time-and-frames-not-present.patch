@@ -1,7 +1,7 @@
 From a0625eaebf8f33bcc667ebcaa30350b89e39a941 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 21:34:56 +0100
-Subject: [PATCH 30/41] NHL: log pipeline compile time and frames not presented
+Subject: [PATCH 30/42] NHL: log pipeline compile time and frames not presented
  while pipelines compile
 
 ---

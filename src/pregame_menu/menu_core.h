@@ -52,7 +52,12 @@ struct Option {
   int def = 0;                 // index of the default choice
   bool restart = false;        // cannot change while the game runs (matters once the menu is reused in game)
   std::string measured;        // evidence or "GUESS"; shown in the doc and hint panel
+  bool oneshot = false;        // a non-default choice applies to the next start only: it is not stored (Settings::ResetOneShots)
 };
+
+// The button script the shader-fill choice hands to NHL_VPAD_SCRIPT (same shape as tools/nuc/ct105/nhl_fill.sh): quick-start
+// presses, then a random press every 0.8-2.4 s until `minutes` minus 20 s. Deterministic for a given seed. minutes < 1 -> "".
+std::string FillScript(int minutes, uint32_t seed);
 
 const std::vector<Option>& DefaultOptions();
 std::vector<std::string> PageNames(const std::vector<Option>& opts);  // in order of first use
@@ -66,6 +71,7 @@ class Settings {
   void SetIndex(const Option& o, int idx);       // out of range ignored
   bool IsDefault(const Option& o) const { return Index(o) == o.def; }
   void ResetAll();
+  void ResetOneShots();                          // options with Option::oneshot go back to default (called before saving)
   bool operator==(const Settings& r) const { return values_ == r.values_; }
 
   // Text format: "# comment", "key=value" lines; only non-default options are stored, unknown keys are kept.

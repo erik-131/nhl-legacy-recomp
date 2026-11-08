@@ -1,0 +1,265 @@
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index fe269f3..4feaa8f 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -683,7 +683,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // Pixel shader experiments, carried in the 4 bits of pixel.param_gen_interpolator, which are free
+   // (always 0) when pixel.param_gen_enable is 0; shaders that use ps_param_gen (VFACE needs signed zero)
+   // never get the flags. Bit 0 nhl_fast_pixel_math (no 0 * x check), 1 no SignedZeroInfNanPreserve,
+-  // 2 unused (implicit LOD moved to interpolators_centroid bit 15), 3 no DenormFlushToZero and RoundingModeRTE.
++  // 2 nhl_ps_pcf_gather (implicit LOD is in interpolators_centroid bit 15), 3 no DenormFlushToZero and RoundingModeRTE.
+   uint32_t NhlPsFlags() const {
+     if (!is_pixel_shader()) return 0;
+     const auto& px = GetSpirvShaderModification().pixel;
+@@ -696,6 +696,20 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     const auto& px = GetSpirvShaderModification().pixel;
+     return (px.interpolators_centroid & 0x8000u) && !(px.interpolator_mask & 0x8000u);
+   }
++  // nhl_ps_pcf_gather (bit 2 of the pixel experiment flags): a 4x4 grid of nearest taps (offsets
++  // -1.5..1.5 texels) of fetch constant 15, usually the shadow map, is done as four 2x2 OpImageGather
++  // calls instead of 16 samples. The command processor sets the bit only when it has verified that the
++  // fetch constant 15 sampler is nearest, anisotropy off, and the texture is a single-level 2D texture.
++  static constexpr uint32_t kNhlPcfGatherFetchConstant = 15;
++  bool NhlPsPcfGather() const { return (NhlPsFlags() & 4u) != 0; }
++  struct NhlGatherCache {
++    spv::Block* block = nullptr;
++    uint32_t reg = UINT32_MAX;
++    uint32_t swz0 = 0, swz1 = 0, component = 0, generation = 0;
++    spv::Id gathered[4] = {spv::NoResult, spv::NoResult, spv::NoResult, spv::NoResult};
++  };
++  NhlGatherCache nhl_gather_cache_;
++  uint32_t nhl_gather_generation_ = 0;
+   uint32_t NhlVsFlags() const {
+     return is_vertex_shader() ? GetSpirvShaderModification().vertex.nhl_flags : 0;
+   }
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 1d61041..b7fe696 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -34,6 +34,7 @@ REXCVAR_DEFINE_BOOL(nhl_register_vars, false, "GPU",
+                     "when a shader is translated: needs a restart to affect shaders already translated")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++
+ namespace rex::graphics {
+ 
+ SpirvShaderTranslator::Features::Features(bool all)
+@@ -192,6 +193,8 @@ uint32_t SpirvShaderTranslator::GetModificationRegisterCount() const {
+ 
+ void SpirvShaderTranslator::StartTranslation() {
+   nhl_infinity_source_seen_ = false;
++  nhl_gather_cache_ = {};
++  nhl_gather_generation_ = 0;
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
+@@ -3646,6 +3649,12 @@ void SpirvShaderTranslator::StoreResult(const InstructionResult& result, spv::Id
+     return;
+   }
+   bool is_clamped = result.is_clamped;
++  if (result.storage_target == InstructionStorageTarget::kRegister &&
++      (result.storage_addressing_mode != InstructionStorageAddressingMode::kAbsolute ||
++       result.storage_index == nhl_gather_cache_.reg)) {
++    // nhl_ps_pcf_gather: the cached gather's coordinate register is (possibly) overwritten.
++    ++nhl_gather_generation_;
++  }
+ 
+   EnsureBuildPointAvailable();
+ 
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 40d7b22..d74f5d0 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -1067,6 +1067,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+     } else {
+       // kTextureFetch or kGetTextureComputedLod.
+ 
++      const spv::Id nhl_coordinates_orig[2] = {coordinates[0], coordinates[1]};
+       // Normalize the XY coordinates, and apply the offset.
+       for (uint32_t i = 0; i <= uint32_t(instr.dimension != xenos::FetchOpDimension::k1D); ++i) {
+         spv::Id& coordinate_ref = coordinates[i];
+@@ -1642,6 +1643,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           }
+         }
+ 
++        uint32_t result_component_for_gather = 0;
++        rex::bit_scan_forward(used_result_nonzero_components, &result_component_for_gather);
+         // Sample the texture.
+         spv::ImageOperandsMask image_operands_mask =
+             nhl_implicit_lod ? spv::ImageOperandsMaskNone
+@@ -1873,6 +1876,90 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+             texture_parameters.gradX = gradients_h;
+             texture_parameters.gradY = gradients_v;
+           }
++          // nhl_ps_pcf_gather: one tap of a 4x4 nearest grid -> one lane of a cached 2x2 OpImageGather.
++          bool nhl_gathered = false;
++          if (NhlPsPcfGather() && fetch_constant_index == kNhlPcfGatherFetchConstant &&
++              TexturesAllUnsigned() && features_.image_view_format_swizzle &&
++              instr.operands[0].storage_source == InstructionStorageSource::kRegister &&
++              instr.operands[0].storage_addressing_mode == InstructionStorageAddressingMode::kAbsolute &&
++              !instr.operands[0].is_negated && !instr.operands[0].is_absolute_value &&
++              instr.dimension == xenos::FetchOpDimension::k2D &&
++              !instr.attributes.unnormalized_coordinates && !revert_resolution_scale_axes &&
++              rex::bit_count(used_result_nonzero_components) == 1 &&
++              size[0] != spv::NoResult && size[1] != spv::NoResult &&
++              (instr.attributes.mag_filter == xenos::TextureFilter::kUseFetchConst ||
++               instr.attributes.mag_filter == xenos::TextureFilter::kPoint) &&
++              (instr.attributes.min_filter == xenos::TextureFilter::kUseFetchConst ||
++               instr.attributes.min_filter == xenos::TextureFilter::kPoint) &&
++              (instr.attributes.aniso_filter == xenos::AnisoFilter::kUseFetchConst ||
++               instr.attributes.aniso_filter == xenos::AnisoFilter::kDisabled)) {
++            // Offsets must be -1.5, -0.5, 0.5, 1.5 texels: k = offset + 1.5 in 0..3, lane = k & 1,
++            // gather coordinate shift s = -1 (k < 2) or +1 (k >= 2) texels (+ the usual rounding epsilon).
++            int k[2];
++            bool offsets_ok = true;
++            for (int i = 0; i < 2; ++i) {
++              float o = i ? instr.attributes.offset_y : instr.attributes.offset_x;
++              float kf = o + 1.5f;
++              k[i] = int(kf);
++              if (kf < 0.0f || kf > 3.0f || float(k[i]) != kf) offsets_ok = false;
++            }
++            if (offsets_ok) {
++              const bool key_ok = nhl_gather_cache_.block == builder_->getBuildPoint() &&
++                                  nhl_gather_cache_.reg == instr.operands[0].storage_index &&
++                                  nhl_gather_cache_.swz0 == uint32_t(instr.operands[0].GetComponent(0)) &&
++                                  nhl_gather_cache_.swz1 == uint32_t(instr.operands[0].GetComponent(1)) &&
++                                  nhl_gather_cache_.component == result_component_for_gather &&
++                                  nhl_gather_cache_.generation == nhl_gather_generation_;
++              if (!key_ok) {
++                nhl_gather_cache_ = {};
++                nhl_gather_cache_.block = builder_->getBuildPoint();
++                nhl_gather_cache_.reg = instr.operands[0].storage_index;
++                nhl_gather_cache_.swz0 = uint32_t(instr.operands[0].GetComponent(0));
++                nhl_gather_cache_.swz1 = uint32_t(instr.operands[0].GetComponent(1));
++                nhl_gather_cache_.component = result_component_for_gather;
++                nhl_gather_cache_.generation = nhl_gather_generation_;
++              }
++              const int gi = (k[0] >> 1) | ((k[1] >> 1) << 1);
++              if (nhl_gather_cache_.gathered[gi] == spv::NoResult) {
++                const float kEps = 1.5f / 1024.0f;
++                const float shift[2] = {(k[0] >> 1) ? 1.0f : -1.0f, (k[1] >> 1) ? 1.0f : -1.0f};
++                spv::Id gather_coords[2];
++                for (int i = 0; i < 2; ++i) {
++                  gather_coords[i] = builder_->createNoContractionBinOp(
++                      spv::OpFAdd, type_float_, nhl_coordinates_orig[i],
++                      builder_->createNoContractionBinOp(
++                          spv::OpFDiv, type_float_, builder_->makeFloatConstant(shift[i] + kEps),
++                          size[i]));
++                }
++                id_vector_temp_.clear();
++                id_vector_temp_.push_back(gather_coords[0]);
++                id_vector_temp_.push_back(gather_coords[1]);
++                id_vector_temp_.push_back(const_float_0_);
++                spv::Builder::TextureParameters gather_parameters = {};
++                gather_parameters.coords =
++                    builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
++                gather_parameters.component = builder_->makeIntConstant(int(result_component_for_gather));
++                gather_parameters.sampler = builder_->createBinOp(
++                    spv::OpSampledImage,
++                    builder_->makeSampledImageType(
++                        builder_->getTypeId(image_2d_array_or_cube_unsigned)),
++                    image_2d_array_or_cube_unsigned, sampler);
++                nhl_gather_cache_.gathered[gi] = builder_->createTextureCall(
++                    spv::NoPrecision, type_float4_, false, false, false, true, false,
++                    gather_parameters, spv::ImageOperandsMaskNone);
++              }
++              // Gather lanes: x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0).
++              const uint32_t lane_x = k[0] & 1, lane_y = k[1] & 1;
++              const uint32_t lane = lane_y ? (lane_x ? 1 : 0) : (lane_x ? 2 : 3);
++              spv::Id lane_value = builder_->createCompositeExtract(
++                  nhl_gather_cache_.gathered[gi], type_float_, lane);
++              sample_result_unsigned = builder_->createCompositeInsert(
++                  lane_value, const_float4_0_, type_float4_, result_component_for_gather);
++              sample_result_signed = const_float4_0_;
++              nhl_gathered = true;
++            }
++          }
++          if (!nhl_gathered) {
+           id_vector_temp_.clear();
+           for (uint32_t i = 0; i < 3; ++i) {
+             id_vector_temp_.push_back(coordinates[i]);
+@@ -1882,6 +1969,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           SampleTexture(texture_parameters, image_operands_mask, image_2d_array_or_cube_unsigned,
+                         image_2d_array_or_cube_signed, sampler, is_any_unsigned, is_any_signed,
+                         sample_result_unsigned, sample_result_signed);
++          }
+         }
+ 
+         // Swizzle the result components manually if needed, to `result`.
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 2714fac..44e45a3 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -38,6 +38,7 @@
+ #include <rex/logging.h>
+ #include <rex/math.h>
+ #include <rex/graphics/util/draw.h>
++#include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/shader/shader.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+@@ -56,6 +57,12 @@
+ #include <rex/ui/vulkan/util.h>
+ 
+ // Legacy backend compatibility aliases for shared readback controls.
++static constexpr uint32_t kNhlGatherFc = 15;  // = SpirvShaderTranslator::kNhlPcfGatherFetchConstant
++REXCVAR_DEFINE_BOOL(nhl_ps_pcf_gather, false, "GPU/Vulkan",
++                    "Pixel shaders: replace the 4x4 grid of nearest taps (offsets -1.5..1.5 texels) on fetch "
++                    "constant 15 (the shadow map) by four 2x2 OpImageGather, when that texture is sampled "
++                    "nearest, without anisotropy, single level (same texels, fewer sampler messages)");
++
+ REXCVAR_DEFINE_BOOL(nhl_test_half_scissor, false, "GPU/Vulkan",
+                     "Measurement only: draw half the pixels, to tell pixel from vertex cost")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -4229,6 +4236,51 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+                                                    ps_param_gen_pos, normalized_depth_control)
+                                              : SpirvShaderTranslator::Modification(0);
+ 
++    // nhl_ps_pcf_gather: let the translator replace the 16 nearest taps of fetch constant 15 by four
++    // OpImageGather, only if that texture is sampled nearest, without anisotropy, as a single-level 2D
++    // texture (then a gather returns exactly the texels the taps would). Flag = bit 2 of the pixel
++    // experiment flags (param_gen_interpolator, free without ps_param_gen), see NhlPsPcfGather().
++    if (pixel_shader && REXCVAR_GET(nhl_ps_pcf_gather) && !pixel_shader_modification.pixel.param_gen_enable &&
++        pixel_shader_modification.pixel.textures_all_unsigned) {
++      bool uses_15 = false;
++      for (const auto& tb : pixel_shader->texture_bindings()) {
++        if (tb.fetch_constant == kNhlGatherFc &&
++            tb.fetch_instr.dimension == xenos::FetchOpDimension::k2D) {
++          uses_15 = true;
++        } else if (tb.fetch_constant == kNhlGatherFc) {
++          uses_15 = false;
++          break;
++        }
++      }
++      if (uses_15) {
++        VulkanShader::SamplerBinding probe = {};
++        probe.fetch_constant = kNhlGatherFc;
++        probe.mag_filter = xenos::TextureFilter::kUseFetchConst;
++        probe.min_filter = xenos::TextureFilter::kUseFetchConst;
++        probe.mip_filter = xenos::TextureFilter::kUseFetchConst;
++        probe.aniso_filter = xenos::AnisoFilter::kUseFetchConst;
++        const auto sp = texture_cache_->GetSamplerParameters(probe);
++        const auto fetch = register_file_->GetTextureFetch(probe.fetch_constant);
++        uint32_t mip_min = 0, mip_max = 0;
++        texture_util::GetSubresourcesFromFetchConstant(fetch, nullptr, nullptr, nullptr, nullptr,
++                                                       nullptr, &mip_min, &mip_max);
++        const bool ok = !sp.mag_linear && !sp.min_linear &&
++                        sp.aniso_filter == xenos::AnisoFilter::kDisabled && mip_min == mip_max &&
++                        fetch.dimension == xenos::DataDimension::k2DOrStacked;
++        static uint64_t nhl_gather_seen = 0, nhl_gather_ok = 0;
++        ++nhl_gather_seen;
++        nhl_gather_ok += ok;
++        if ((nhl_gather_seen & 0x3FFF) == 1) {
++          REXGPU_INFO("[nhl-gather] draws checked={} eligible={} (last: mag_lin={} min_lin={} aniso={} mips={}..{} dim={})",
++                      nhl_gather_seen, nhl_gather_ok, uint32_t(sp.mag_linear), uint32_t(sp.min_linear),
++                      uint32_t(sp.aniso_filter), mip_min, mip_max, uint32_t(fetch.dimension));
++        }
++        if (ok) {
++          pixel_shader_modification.pixel.param_gen_interpolator |= 4u;
++        }
++      }
++    }
++
+     // Translate the shaders now to obtain the sampler bindings.
+     vertex_shader_translation = static_cast<VulkanShader::VulkanTranslation*>(
+         vertex_shader->GetOrCreateTranslation(vertex_shader_modification.value));

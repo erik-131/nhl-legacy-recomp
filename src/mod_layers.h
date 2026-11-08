@@ -50,7 +50,10 @@ class ModIndex {
   using LogFn = std::function<void(const std::string&)>;
 
   // Never throws. A missing/empty/unreadable root yields an empty index.
-  static ModIndex Scan(const std::filesystem::path& root, const LogFn& log = {});
+  // `force_disabled`: ids (any case) that are treated as disabled (disabled_by "not selected"), used for
+  // mutually exclusive mods such as roster sets (src/roster_choice.h).
+  static ModIndex Scan(const std::filesystem::path& root, const LogFn& log = {},
+                       const std::vector<std::string>& force_disabled = {});
 
   // O(1). `path` may use '\' or '/', any case, leading separators. nullptr = no mod
   // provides it (or the path is invalid).

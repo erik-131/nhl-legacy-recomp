@@ -1,7 +1,7 @@
 From 2d6facc6d63b38a01da31f2c822876d624ac4caa Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 19:19:06 +0100
-Subject: [PATCH 38/41] vulkan: REX_NHL_SPIRV_OPT experiment (system
+Subject: [PATCH 38/42] vulkan: REX_NHL_SPIRV_OPT experiment (system
  SPIRV-Tools optimizer before shader module creation, dev only)
 
 ---

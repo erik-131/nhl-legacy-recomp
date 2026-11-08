@@ -1,7 +1,7 @@
 From 0d4dde74015e7cc6f6febc59fae06894fb76638d Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 10:40:27 +0100
-Subject: [PATCH 41/41] nhl: unsigned texture spec, register vars, GPU
+Subject: [PATCH 41/42] nhl: unsigned texture spec, register vars, GPU
  attribution, readback batch/skip depth, clear-through, full32 fused, draw
  stats, tile log, implicit LOD (all default off)
 

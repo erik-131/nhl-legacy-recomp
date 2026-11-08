@@ -1,7 +1,7 @@
 From 524efb1e952d97038029583e010ab405255b28f4 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 23:58:42 +0100
-Subject: [PATCH 31/41] NHL: no placeholder pipelines on the command thread,
+Subject: [PATCH 31/42] NHL: no placeholder pipelines on the command thread,
  draws using them are dropped anyway
 
 Cold storage, 2 runs each: all present gaps 6326, 5852 -> 5218, 4630 ms, worst in gameplay 486, 492 -> 322, 346 ms, 0 incomplete frames.

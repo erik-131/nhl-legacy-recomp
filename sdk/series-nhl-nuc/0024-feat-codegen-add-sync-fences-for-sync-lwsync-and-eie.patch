@@ -1,7 +1,7 @@
 From d62abf063163d1cad8bd9c2a82cef92a313794a0 Mon Sep 17 00:00:00 2001
 From: Carlos Estrague <maximu@gmail.com>
 Date: Thu, 1 Oct 2026 21:00:26 -0400
-Subject: [PATCH 24/41] feat(codegen): add sync fences for sync, lwsync, and
+Subject: [PATCH 24/42] feat(codegen): add sync fences for sync, lwsync, and
  eieio
 
 ---

@@ -1,7 +1,7 @@
 From 0e6180b51fb46d801eb6395d72d9088741487e38 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 01:59:09 +0100
-Subject: [PATCH 17/41] NHL fix: dispatch queued DPCs on the kernel dispatch
+Subject: [PATCH 17/42] NHL fix: dispatch queued DPCs on the kernel dispatch
  thread (boot stall: D3D worker wake-up DPC never ran) + [nhl-dpc] log
 
 ---

@@ -1,7 +1,7 @@
 From 648d9f780fef8d22c6e2469717d2407162eb3ddd Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 04:05:53 +0100
-Subject: [PATCH 32/41] NHL: GPU profile per render target and per resolve
+Subject: [PATCH 32/42] NHL: GPU profile per render target and per resolve
  (dump and copy); test switches for half pixels, fast vertex math and dumping
  one sample
 

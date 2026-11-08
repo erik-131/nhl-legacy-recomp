@@ -1,7 +1,7 @@
 From ea88b898d33088971bdfd4706b4a918a76148289 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 03:42:23 +0100
-Subject: [PATCH 21/41] NHL: gpu_stream_skip_unchanged - skip uploading
+Subject: [PATCH 21/42] NHL: gpu_stream_skip_unchanged - skip uploading
  invalidated pages whose bytes did not change (default off)
 
 ---

@@ -1,7 +1,7 @@
 From 0fa9e98e9365a815d7ca1ca6099a7fb698851803 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 13:26:23 +0100
-Subject: [PATCH 27/41] NHL: PROCMAP_QUERY for page protection lookups,
+Subject: [PATCH 27/42] NHL: PROCMAP_QUERY for page protection lookups,
  allocation-free /proc/self/maps fallback; type-0 register ranges in bulk,
  known-register bitset
 

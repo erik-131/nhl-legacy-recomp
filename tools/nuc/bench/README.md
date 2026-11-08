@@ -31,3 +31,6 @@ Output: per-second frames/packets/kB/s/max gaps, then a summary with frame-inter
 with a gap > 25 ms and audio gaps > 30 ms (with clock times). Video frames are grouped by the NV_VIDEO_PACKET frameIndex
 (Sunshine/Wolf leave the RTP timestamp at 0; the old timestamp-based count gave 0-3 frames/s); if that field does not look
 sane (encrypted video) it falls back to burst grouping (`--burst-gap`, default 3 ms). Not yet run against a real stream.
+
+## Queue, A/B, triage (2026-11-07)
+`bq.sh` (fair bench queue with private snapshots and guarded deploy), `bq-bench.sh` (standard job body), `ab.sh` (queued interleaved A/B + stats), `abstat.py` (min/p1/p5/median/fraction >= 100 + bootstrap CI from logs, CSV database), `triage.py` (did it crash), `diskclean.sh` (dry-run by default).

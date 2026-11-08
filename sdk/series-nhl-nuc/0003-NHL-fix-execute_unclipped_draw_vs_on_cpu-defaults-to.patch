@@ -1,7 +1,7 @@
 From 71906dfd5c99141914c928ec99df7d4d63337093 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 15:16:35 +0100
-Subject: [PATCH 03/41] NHL fix: execute_unclipped_draw_vs_on_cpu defaults to
+Subject: [PATCH 03/42] NHL fix: execute_unclipped_draw_vs_on_cpu defaults to
  true (rtv black 3D)
 
 ---

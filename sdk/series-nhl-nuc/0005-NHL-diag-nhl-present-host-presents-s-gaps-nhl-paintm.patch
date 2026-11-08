@@ -1,7 +1,7 @@
 From 219a9c6ad50b091c394d43f6cb3f97ff7d5a2a62 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 18:29:22 +0100
-Subject: [PATCH 05/41] NHL diag: [nhl-present] host presents/s + gaps,
+Subject: [PATCH 05/42] NHL diag: [nhl-present] host presents/s + gaps,
  [nhl-paintmode] presenter paint mode changes
 
 ---

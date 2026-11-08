@@ -39,3 +39,4 @@ Shown value = stored value + `low` (ints, dates, times; not floats). Rows are bi
 ## Next L2 modules
 - Row/cursor layer: 0x8279ECD8 (row lookup, deleted bitmap), 0x8279F3D0 (record reader) and the query objects (FieldRef ctor 0x827B10C8, TableRef 0x827B4818, Execute 0x827B4B20, RowCount 0x827B42E8). Finishing it makes GetFieldValue replaceable and gives a complete typed `Table.get(row, field)`.
 - Roster loaders on top of it: player bios 0x82A0A488, team-table loader 0x82AF85A8, the container ctor 0x82A13970 (sizes players = max(rows) x 556 B, teams x 200 B). Those are where team-count/year limits live (see roster notes), so this is where full source control pays off first.
+- **In-game VERIFY (mode 1) run on 2026-11-07**: 14,603 hash, 8,775 find-table, 9,729 find-field, 1,694,388 extract and 783,588 get-value calls, **0 mismatches** in all five functions (42,056 extracts skipped by design). Replace mode (2) not yet run.

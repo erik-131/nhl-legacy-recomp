@@ -1,7 +1,7 @@
 From 491f133e2d2adaa350914eb7d4f9c194ec84a768 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 18:29:43 +0100
-Subject: [PATCH 37/41] vulkan: log SPIR-V sizes with pso times,
+Subject: [PATCH 37/42] vulkan: log SPIR-V sizes with pso times,
  REX_NHL_SPIRV_DUMP, nhl_fast_pixel_math (default off)
 
 ---

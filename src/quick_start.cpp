@@ -6,20 +6,24 @@
 // title and Start on the notice, so alternating them is safe until the main menu, where A would select Play Now. The
 // FE files the game opens tell where the boot is. A press from the player ends it at once, and so does the time limit.
 // These screens are timed, so NHL_BOOT_CLOCK runs the guest clock faster until then (menu at 14 s instead of 24 at 3x).
-// NHL_QUICK_MOVIE_FRAMES serves a short EA movie (10 s). Serving another screen for the legal text hangs the boot.
+// NHL_QUICK_MOVIE_FRAMES serves a short logo movie (10 s). Serving a screen that does not say "legal screen entered" for the legal text
+// hangs the boot; nhl_skip_legal serves one that does (docs/boot-flow.md).
 #include "quick_start.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
 REXCVAR_DEFINE_BOOL(nhl_quick_start, false, "NHL", "Press through the boot screens up to the main menu");
+REXCVAR_DEFINE_BOOL(nhl_skip_legal, false, "NHL", "Leave out the legal text screen in the boot flow (docs/boot-flow.md)");
 
 namespace nhllegacy {
 namespace {
@@ -77,6 +81,32 @@ std::shared_ptr<const std::vector<uint8_t>> EarlyCues(const std::vector<uint8_t>
   return out;
 }
 
+// The legal screen is served as a copy of the "publisher notice" screen (a blank movie with no timeline, so the boot flow goes on at
+// once), which says that the legal screen has been entered: the flow waits for exactly that notice (docs/boot-flow.md).
+std::shared_ptr<const std::vector<uint8_t>> BlankLegal(const std::filesystem::path& legal_host) {
+  std::ifstream f(legal_host.parent_path() / "00_ealogo.big", std::ios::binary);
+  std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  static const char kFrom[] = "BOOTFLOW_EA_INTHEGAME";
+  static const char kTo[] = "BOOTFLOW_LEGAL";
+  const auto it = std::search(d.begin(), d.end(), kFrom, kFrom + sizeof(kFrom) - 1);
+  if (d.size() < 64 || std::memcmp(d.data(), "BIGF", 4) != 0 || it == d.end() ||
+      std::search(it + 1, d.end(), kFrom, kFrom + sizeof(kFrom) - 1) != d.end()) {
+    REXLOG_WARN("[nhl-boot] legal screen left in: the blank screen was not found");
+    return nullptr;
+  }
+  std::fill(it, it + sizeof(kFrom) - 1, uint8_t(0));
+  std::copy(kTo, kTo + sizeof(kTo) - 1, it);
+  REXLOG_INFO("[nhl-boot] legal screen served blank");
+  return std::make_shared<std::vector<uint8_t>>(std::move(d));
+}
+
+// The boot clock goes on at the first file the game opens (the first poll of the pad can come late when screens are left out).
+void EnsureBootClock() {
+  static std::atomic<bool> set{false};
+  if (!REXCVAR_GET(nhl_quick_start) || g_done.load() || set.exchange(true)) return;
+  if (const char* e = std::getenv("NHL_BOOT_CLOCK")) rex::chrono::Clock::set_guest_time_scalar(std::strtod(e, nullptr));
+}
+
 void Finish(const char* why) {
   if (!g_done.exchange(true)) {
     rex::chrono::Clock::set_guest_time_scalar(1.0);
@@ -87,6 +117,7 @@ void Finish(const char* why) {
 }  // namespace
 
 void QuickStartNoteFile(const char* path) {
+  EnsureBootClock();
   if (!REXCVAR_GET(nhl_quick_start) || g_done.load()) return;
   if (std::strstr(path, "01_legal")) {
     if (!g_language_done.exchange(true)) REXLOG_INFO("[nhl-quick] language done");
@@ -109,6 +140,13 @@ std::shared_ptr<const std::vector<uint8_t>> QuickStartServe(const std::string& p
   if (path.find("ealogo.sub") != std::string::npos) {
     return g_short_movie.exchange(false) ? EarlyCues(*read(host, 1 << 16)) : nullptr;
   }
+  if (REXCVAR_GET(nhl_skip_legal)) {
+    const auto ends = [&](const char* tail) {
+      const size_t n = std::strlen(tail);
+      return path.size() >= n && std::equal(path.end() - long(n), path.end(), tail);
+    };
+    if (ends("bootflow\\01_legal.big") || ends("bootflow/01_legal.big")) return BlankLegal(host);
+  }
   static const char* movie_frames = std::getenv("NHL_QUICK_MOVIE_FRAMES");
   if (movie_frames && QuickStartActive() && path.find("ealogo.vp6") != std::string::npos) {
     REXLOG_INFO("[nhl-quick] short EA movie");
@@ -119,16 +157,16 @@ std::shared_ptr<const std::vector<uint8_t>> QuickStartServe(const std::string& p
   return nullptr;
 }
 
+bool QuickStartEnabled() { return REXCVAR_GET(nhl_quick_start); }
+
 bool QuickStartActive() {
   return REXCVAR_GET(nhl_quick_start) && !g_done.load();
 }
 
 uint16_t QuickStartButtons(uint16_t real_buttons) {
   if (!QuickStartActive()) return 0;
-  static const Clock::time_point start = [] {
-    if (const char* e = std::getenv("NHL_BOOT_CLOCK")) rex::chrono::Clock::set_guest_time_scalar(std::strtod(e, nullptr));
-    return Clock::now();
-  }();
+  EnsureBootClock();
+  static const Clock::time_point start = Clock::now();
   const auto since = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start);
   g_elapsed = since.count();
   if (since > kLimit) {

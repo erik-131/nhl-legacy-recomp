@@ -1,7 +1,7 @@
 From cea95644761d3b2cd202e98600f8ff985f940afc Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 23:43:04 +0100
-Subject: [PATCH 10/41] NHL: Audio Worker waits non-alertable (no 1 ms APC
+Subject: [PATCH 10/42] NHL: Audio Worker waits non-alertable (no 1 ms APC
  poll)
 
 ---

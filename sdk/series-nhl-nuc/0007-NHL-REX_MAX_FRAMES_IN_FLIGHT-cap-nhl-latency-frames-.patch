@@ -1,7 +1,7 @@
 From 3de9303420296066f3cf2c3dfb5987305cecf67b Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 19:40:55 +0100
-Subject: [PATCH 07/41] NHL: REX_MAX_FRAMES_IN_FLIGHT cap + [nhl-latency]
+Subject: [PATCH 07/42] NHL: REX_MAX_FRAMES_IN_FLIGHT cap + [nhl-latency]
  frames-ahead metric
 
 ---

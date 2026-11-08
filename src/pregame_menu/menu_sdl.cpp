@@ -5,6 +5,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -103,11 +104,13 @@ uint32_t KeyBits() {
   return b;
 }
 
-// NHL_MENU_SCRIPT="a,down,a,start": one press per token (2 frames down, 3 up); "wait" = 10 idle frames.
+// NHL_MENU_SCRIPT="a,down,a,start": one press per token (2 frames down, 3 up); "wait" = 10 idle frames; "shot" = save the
+// window to $NHL_MENU_SHOT_DIR/menu_shot_NN.bmp (after a short settle).
+constexpr uint32_t kShotFlag = 1u << 31;
 std::vector<uint32_t> ParseScript(const char* text) {
   static const struct { const char* n; uint32_t b; } names[] = {
       {"up", kUp}, {"down", kDown}, {"left", kLeft}, {"right", kRight}, {"a", kA}, {"b", kB}, {"x", kX}, {"y", kY},
-      {"lb", kLB}, {"rb", kRB}, {"start", kStart}, {"back", kBack}, {"wait", 0}};
+      {"lb", kLB}, {"rb", kRB}, {"start", kStart}, {"back", kBack}, {"wait", 0}, {"shot", kShotFlag}};
   std::vector<uint32_t> frames(3, 0);  // pad bits per frame; idle lead-in, the menu ignores buttons held at its first frame
   std::string t(text ? text : "");
   for (size_t i = 0; i <= t.size();) {
@@ -118,6 +121,7 @@ std::vector<uint32_t> ParseScript(const char* text) {
     for (const auto& n : names) {
       if (tok != n.n) continue;
       if (n.b == 0) frames.insert(frames.end(), 10, 0);
+      else if (n.b == kShotFlag) { frames.insert(frames.end(), 4, 0); frames.push_back(kShotFlag); frames.insert(frames.end(), 2, 0); }
       else { frames.insert(frames.end(), 2, n.b); frames.insert(frames.end(), 3, 0); }
     }
   }
@@ -246,6 +250,7 @@ MenuResult RunPregameMenu() {
   MenuResult result = MenuResult::Skipped;
   Settings final_settings = saved;  // what gets applied
 
+  SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");  // pad events before the window has focus (Moonlight)
   const bool video_ok = SDL_WasInit(SDL_INIT_VIDEO) || SDL_InitSubSystem(SDL_INIT_VIDEO);
   const bool pad_sys = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
   if (!video_ok) {
@@ -254,11 +259,41 @@ MenuResult RunPregameMenu() {
     return MenuResult::Failed;
   }
   {
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");  // pad events before the window has focus (Moonlight)
     Pads pads;
+    if (const char* td = std::getenv("NHL_MENU_TEST_VPAD_DELAY_S")) {  // test only: a virtual pad that appears late, like the Wolf hot-plug
+      std::thread([d = std::atof(td)] {
+        SDL_Delay(Uint32(d * 1000.0));
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD; desc.naxes = 6; desc.nbuttons = 15; desc.nhats = 1;
+        desc.vendor_id = 0x045e; desc.product_id = 0x028e; desc.name = "NHL Menu Test Pad";
+        SDL_AttachVirtualJoystick(&desc);
+      }).detach();
+    }
     SDL_PumpEvents();
     pads.Refresh();
-    const bool have_kb = SDL_HasKeyboard();
+    const bool ignore_kb = EnvEquals("NHL_MENU_IGNORE_KB", "1");  // test only: pretend there is no keyboard
+    bool have_kb = !ignore_kb && SDL_HasKeyboard();
+    // Wolf/Moonlight hot-plugs the virtual pad some seconds after the process starts (the maintainer's logs: +1.5 to +18 s), so
+    // "no pad yet" is not "no pad": wait for one (NHL_MENU_PAD_WAIT_S, default 20, 0 = do not wait) before skipping.
+    if (pads.open.empty() && !have_kb && !EnvEquals("NHL_MENU_FORCE", "1")) {
+      const char* pw = std::getenv("NHL_MENU_PAD_WAIT_S");
+      const double wait_s = pw ? std::atof(pw) : 20.0;
+      const uint64_t w0 = SDL_GetTicks();
+      if (wait_s > 0) MENU_LOG(INFO, "[nhl-menu] no pad or keyboard yet; waiting up to {} s for one", wait_s);
+      while (wait_s > 0 && pads.open.empty() && !have_kb && double(SDL_GetTicks() - w0) < wait_s * 1000.0) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+          if (e.type == SDL_EVENT_GAMEPAD_ADDED) pads.Refresh();
+        }
+        pads.Refresh();
+        have_kb = !ignore_kb && SDL_HasKeyboard();
+        SDL_Delay(50);
+      }
+      if (wait_s > 0) MENU_LOG(INFO, "[nhl-menu] input wait ended after {} ms (pads={}, keyboard={})", SDL_GetTicks() - w0, pads.open.size(), have_kb);
+    }
+    MENU_LOG(INFO, "[nhl-menu] input at check: pads={} keyboard={}", pads.open.size(), have_kb);
+    for (auto* g : pads.open) MENU_LOG(INFO, "[nhl-menu]   pad: {}", SDL_GetGamepadName(g) ? SDL_GetGamepadName(g) : "?");
     const bool have_input = !pads.open.empty() || have_kb || EnvEquals("NHL_MENU_FORCE", "1");  // FORCE: tests without a device
     const bool back_held = (pads.Bits() & kBack) || (KeyBits() & kB);
     if (!have_input) {
@@ -278,6 +313,7 @@ MenuResult RunPregameMenu() {
         size_t script_pos = 0;
         int all_settle = 0, all_hold = 0;
         size_t all_tab = 0;
+        int shot_n = 0;
         bool dumped = false, first_logged = false;
         MenuConfig cfg;
         const char* as = std::getenv("NHL_MENU_AUTOSTART_S");
@@ -295,12 +331,21 @@ MenuResult RunPregameMenu() {
             else if (e.type == SDL_EVENT_GAMEPAD_REMOVED) pads.Drop(e.gdevice.which);
           }
           uint32_t inject = script_pos < script.size() ? script[script_pos++] : 0;
+          const bool want_shot = (inject & kShotFlag) != 0;
+          inject &= ~kShotFlag;
           if (dump_all && all_hold > 0) { inject |= kRB; --all_hold; }
           if (inject) MENU_LOG(INFO, "[nhl-menu] scripted input bits {:#x} at {} ms", inject, frame - t0);
           if (out == Outcome::Running) out = menu.Update(pads.Bits() | KeyBits() | inject, frame - t0);
           if (!Draw(win, font, menu, frame - t0)) { MENU_LOG(WARN, "[nhl-menu] window surface lost: {}", SDL_GetError()); out = Outcome::Discard; }
           else {
             if (!first_logged && (first_logged = true)) MENU_LOG(INFO, "[nhl-menu] first frame drawn at SDL tick {} ms (window created {} ms earlier)", SDL_GetTicks(), SDL_GetTicks() - t0);
+            if (want_shot) {
+              const char* sd = std::getenv("NHL_MENU_SHOT_DIR");
+              const std::string file = std::string(sd ? sd : ".") + "/menu_shot_" + (shot_n < 10 ? "0" : "") + std::to_string(shot_n) + ".bmp";
+              ++shot_n;
+              SDL_SaveBMP(SDL_GetWindowSurface(win), file.c_str());
+              MENU_LOG(INFO, "[nhl-menu] scripted shot {}", file);
+            }
             if (dump && !dumped) { dumped = true; SDL_SaveBMP(SDL_GetWindowSurface(win), dump); MENU_LOG(INFO, "[nhl-menu] dumped first frame to {}", dump); }
             if (dump_all && all_hold == 0 && ++all_settle >= 3) {  // let the page settle, then dump this tab
               all_settle = 0;
@@ -321,7 +366,9 @@ MenuResult RunPregameMenu() {
         if (out == Outcome::StartGame) {
           final_settings = menu.settings();
           result = MenuResult::Started;
-          if (menu.dirty() && !final_settings.Save(ini)) MENU_LOG(WARN, "[nhl-menu] could not save {}", ini);
+          Settings to_save = final_settings;
+          to_save.ResetOneShots();  // "pre-compile shaders" applies to this start only
+          if (!(to_save == saved) && !to_save.Save(ini)) MENU_LOG(WARN, "[nhl-menu] could not save {}", ini);
         } else {
           result = out == Outcome::TimedOut ? MenuResult::TimedOut : MenuResult::Discarded;
         }

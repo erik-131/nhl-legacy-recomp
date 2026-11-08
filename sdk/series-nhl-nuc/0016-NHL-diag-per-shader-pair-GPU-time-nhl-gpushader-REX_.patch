@@ -1,7 +1,7 @@
 From a357e834f903d47f4f1215c33821a860a355ea2f Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 01:58:58 +0100
-Subject: [PATCH 16/41] NHL diag: per shader-pair GPU time ([nhl-gpushader],
+Subject: [PATCH 16/42] NHL diag: per shader-pair GPU time ([nhl-gpushader],
  REX_GPU_PROF_SHADERS)
 
 ---

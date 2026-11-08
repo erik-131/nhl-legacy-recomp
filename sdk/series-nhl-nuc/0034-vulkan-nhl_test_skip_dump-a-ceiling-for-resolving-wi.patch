@@ -1,7 +1,7 @@
 From 2b1988c5008762981a5b0b92d0b99094eaed9c31 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 11:02:35 +0100
-Subject: [PATCH 34/41] vulkan: nhl_test_skip_dump, a ceiling for resolving
+Subject: [PATCH 34/42] vulkan: nhl_test_skip_dump, a ceiling for resolving
  without the EDRAM dump
 
 ---

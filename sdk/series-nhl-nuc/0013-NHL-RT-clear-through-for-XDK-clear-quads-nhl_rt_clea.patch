@@ -1,7 +1,7 @@
 From 2c08d7bde7489bca3fc04a4a8d6774452b369b17 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 00:06:16 +0100
-Subject: [PATCH 13/41] NHL: RT clear-through for XDK clear quads
+Subject: [PATCH 13/42] NHL: RT clear-through for XDK clear quads
  (nhl_rt_clear_through, default off)
 
 ---

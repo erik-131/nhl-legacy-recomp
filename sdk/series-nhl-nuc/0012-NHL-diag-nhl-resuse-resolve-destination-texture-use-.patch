@@ -1,7 +1,7 @@
 From 5c2cfb9b2e5fa557e2ac53863dcff2f50273d131 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 00:04:25 +0100
-Subject: [PATCH 12/41] NHL diag: [nhl-resuse] resolve destination texture-use
+Subject: [PATCH 12/42] NHL diag: [nhl-resuse] resolve destination texture-use
  stats (NHL_RESOLVE_USE_STATS)
 
 ---

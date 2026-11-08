@@ -1,7 +1,7 @@
 From 11a6ac91302ae8c0d3d95543d57a6150f7fb5f67 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 14:27:56 +0100
-Subject: [PATCH 36/41] vulkan: nhl_async_no_submit_wait, EndSubmission neither
+Subject: [PATCH 36/42] vulkan: nhl_async_no_submit_wait, EndSubmission neither
  compiles nor waits for pipelines (default off)
 
 ---

@@ -39,6 +39,17 @@ already set wins over the launcher default.
   the boot and 150 ran as normal, so do not try other values below 150 unless you know why. The legal text screen
   cannot be replaced or skipped (replacing it hung the boot).
 
+### Legal and language screens
+- **Does:** `REX_NHL_SKIP_LEGAL=true` serves the legal text screen blank (the cloud background stays, no text), and
+  `REX_NHL_SKIP_LANGUAGE=true` makes the game skip the language selection screen. Details and the reasons the first attempts
+  hung: [boot-flow.md](boot-flow.md).
+- **Set:** cvars `nhl_skip_legal`, `nhl_skip_language` (both default off; dev build only so far).
+- **Measured (11-07, dev, quick start with clock and short movie):** the screens are gone, but the time to the main menu is the
+  same (10.6 to 11.7 s against 11.1): the boot is load-bound and the screens only cover the loading, so the wait moves to the next
+  screen. Repeats: see boot-flow.md.
+- **Risks:** the legal screen needs the exact file layout of the install (if the logo screen file is missing or different, the
+  log says `legal screen left in` and the stock text shows). Language: the game language stays the default (English).
+
 ### 1x multisampling of the main pass
 - **Does:** draws the 3D main pass at 1 sample instead of the game's 2x.
 - **Set:** cvar `nhl_force_host_msaa_1x` (env `REX_NHL_FORCE_HOST_MSAA_1X` by the `REX_<cvar>` pattern; also a row in the
@@ -95,6 +106,17 @@ already set wins over the launcher default.
   Replays, goals, penalties and fights are not reached; normal play adds the remaining ~110. The storage files hold
   shader code derived from the game: keep them private. The storage is shared by all installs with the same cache root.
 
+## Gameplay options (hooks; dev build)
+
+### Manual line changes
+- **Does:** `REX_NHL_MANUAL_LINES=true` starts every match with manual line changes for both sides, whatever the in-game "Line
+  Changes" option or the saved profile says (the option is not changed; the readers are overridden). Details:
+  [line-change.md](line-change.md).
+- **Set:** cvar `nhl_manual_lines` (default off). `NHL_LOG_LINE_CHANGES=1` logs each executed line change (dev).
+- **Measured (11-07, quick route):** both sides read mode 0 (auto) and were set to 1 (`[nhl-lines] side 0/1 line change mode 0 -> 1`).
+- **Measured (11-07, quick route):** both sides read mode 2 (auto) and were set to 1 (`[nhl-lines] side 0/1 line change mode 2 -> 1`); at the first whistle the user's side no longer got an automatic line change (a stock run changes both teams).
+- **Risks:** online matches not tested; the AI team still changes its own lines.
+
 ## Pre-game menu (in development)
 
 - **Does:** a small window before the game starts, for pad or keyboard: five tabs (Start, Performance, Look, Display,
@@ -102,11 +124,38 @@ already set wins over the launcher default.
   ini keys as above (list and table: [menu-design.md](menu-design.md)). Settings are stored in `nhl_pregame.ini` beside
   the executable (only non-default choices); some also in `nhl_enhancements.ini`.
 - **Set:** `NHL_MENU=1` (off by default). An environment variable that is already set wins over the menu.
-  Test helpers: `NHL_MENU_FORCE=1`, `NHL_MENU_AUTOSTART_S`, `NHL_MENU_SCRIPT`, `NHL_MENU_DUMP`, `NHL_MENU_DUMP_ALL`.
+  Waits up to `NHL_MENU_PAD_WAIT_S` s (default 20, 0 = off) for a pad or keyboard before skipping (Wolf hot-plugs the pad 1.5-18 s after start).
+  Test helpers: `NHL_MENU_TEST_VPAD_DELAY_S`, `NHL_MENU_IGNORE_KB=1`, `NHL_MENU_FORCE=1`, `NHL_MENU_AUTOSTART_S`, `NHL_MENU_SCRIPT`, `NHL_MENU_DUMP`, `NHL_MENU_DUMP_ALL`.
 - **Measured (11-06):** window about 85 ms after process start, first frame 1 ms later; the game booted normally ~7 s
   later in the test; a discard, timeout or unchanged Start left `nhl_enhancements.ini` byte-identical.
-- **Not done:** a real pad or keyboard, delivery of pad events through Moonlight/Wolf, and the "Prepare shaders" item
-  are untested or not wired.
+- **Shader fill from the menu:** Start tab, "Pre-compile shaders (once)": No / Yes, next start: 10 min / 30 min. It runs the
+  `nhl_fill.sh` route inside the game process (scripted pad, no sound, `NHL_VPAD_EXIT_AFTER_SEC` ends the process) at the
+  next start only, then resets itself. **What you do:** set Boot screens to Quick start (default), pick "Yes, 30 min", press
+  Start, leave the pad alone; after 30 minutes the game closes by itself; start it again to play. It presses buttons on your
+  profile and saves: use a scratch profile if that matters. Env override: `NHL_VPAD_SCRIPT` set by a launcher wins.
+- **Not done:** a real pad or keyboard, delivery of pad events through Moonlight/Wolf are untested.
+
+### Rows in the pre-game menu (built 2026-11-07: `legal`, `lang`, `manual_lines`, `replay_shadows`, `cap` 60 fps, `fill`)
+
+| Tab | Row (id) | Choices (default first) | Sets | Restart | Hint |
+|---|---|---|---|---|---|
+| Start | Legal screen (`legal`) | Shown / Hidden | `REX_NHL_SKIP_LEGAL` unset / `true` | yes | "Hides the legal text (blank clouds instead). Does not shorten the boot: the game is loading behind it." |
+| Start | Language screen (`lang`) | Shown / Hidden | `REX_NHL_SKIP_LANGUAGE` unset / `true` | yes | "Skips the language choice and keeps the default language. Does not shorten the boot." |
+| Gameplay (new tab, or Advanced) | Line changes (`manual_lines`) | Game option / Always manual | `REX_NHL_MANUAL_LINES` unset / `true` | yes (read per call, so a pre-game choice applies from the first match) | "Every match starts with manual line changes for both sides. The in-game option is left alone." |
+
+Notes: both boot rows work with or without quick start and are independent of each other. Neither is on by default; whether
+`legal` should be on by default is the maintainer's call (no time gain, it only hides the text).
+
+### Rows to add to the pre-game menu (spec for `src/pregame_menu`)
+
+| Tab | Row (id) | Choices (default first) | Sets | Restart | Hint |
+|---|---|---|---|---|---|
+| Start | Legal screen (`legal`) | Shown / Hidden | `REX_NHL_SKIP_LEGAL` unset / `true` | yes | "Hides the legal text (blank clouds instead). Does not shorten the boot: the game is loading behind it." |
+| Start | Language screen (`lang`) | Shown / Hidden | `REX_NHL_SKIP_LANGUAGE` unset / `true` | yes | "Skips the language choice and keeps the default language. Does not shorten the boot." |
+| Gameplay (new tab, or Advanced) | Line changes (`manual_lines`) | Game option / Always manual | `REX_NHL_MANUAL_LINES` unset / `true` | yes (read per call, so a pre-game choice applies from the first match) | "Every match starts with manual line changes for both sides. The in-game option is left alone." |
+
+Notes: both boot rows work with or without quick start and are independent of each other. Neither is on by default; whether
+`legal` should be on by default is the maintainer's call (no time gain, it only hides the text).
 
 ## Audio statistics and stream cadence
 

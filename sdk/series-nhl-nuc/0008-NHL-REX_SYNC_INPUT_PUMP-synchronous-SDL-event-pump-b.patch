@@ -1,7 +1,7 @@
 From de5124214371a6b289035cd5d691f2ecd5e0fd73 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 22:11:21 +0100
-Subject: [PATCH 08/41] NHL: REX_SYNC_INPUT_PUMP synchronous SDL event pump
+Subject: [PATCH 08/42] NHL: REX_SYNC_INPUT_PUMP synchronous SDL event pump
  before input reads
 
 ---

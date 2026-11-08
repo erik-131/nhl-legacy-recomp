@@ -1,7 +1,7 @@
 From 53e9f4bde8e81bcf8bf75b6f1b84f9d57af47a73 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 02:28:31 +0100
-Subject: [PATCH 19/41] NHL diag: [nhl-cmdstats] render passes / pipeline binds
+Subject: [PATCH 19/42] NHL diag: [nhl-cmdstats] render passes / pipeline binds
  / barriers per frame (REX_CMD_STATS)
 
 ---

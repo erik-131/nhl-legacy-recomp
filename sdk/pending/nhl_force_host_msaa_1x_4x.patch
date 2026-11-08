@@ -1,0 +1,174 @@
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 1a6f296..0ccd0a0 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -173,6 +173,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // the guest renders 2x/4x MSAA. EDRAM tile math still uses the guest sample count; only host
+   // images, render passes, pipelines and the shaders that fetch from host images change.
+   bool host_msaa_1x() const { return host_msaa_1x_; }
++  // Per guest sample count: nhl_force_host_msaa_1x (all) or nhl_force_host_msaa_1x_4x (4x only).
++  bool HostMsaa1x(xenos::MsaaSamples guest_samples) const {
++    return host_msaa_1x_ || (host_msaa_1x_4x_ && guest_samples == xenos::MsaaSamples::k4X);
++  }
+   bool msaa_2x_no_attachments_supported() const { return msaa_2x_no_attachments_supported_; }
+   bool IsMsaa2xSupported(bool subpass_has_attachments) const {
+     return subpass_has_attachments ? msaa_2x_attachments_supported_
+@@ -943,6 +947,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   bool msaa_2x_attachments_supported_ = false;
+   bool host_msaa_1x_ = false;
++  bool host_msaa_1x_4x_ = false;
+   bool msaa_2x_no_attachments_supported_ = false;
+   bool color_16bit_transfer_uint_formats_supported_ = true;
+   bool color_32bit_transfer_uint_formats_supported_ = true;
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index adf8b53..838feec 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -3573,7 +3573,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+     // Keep parity with D3D12 host-render-target path, where draws without
+     // color/depth attachments must run at 1x sample count.
+     multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+-  } else if (render_target_cache_.host_msaa_1x()) {
++  } else if (render_target_cache_.HostMsaa1x(description.render_pass_key.msaa_samples)) {
+     // NHL performance mode: 1-sample host render targets for any guest sample count.
+     multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+   } else if (description.render_pass_key.msaa_samples == xenos::MsaaSamples::k2X &&
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index d103982..699d143 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -51,6 +51,10 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ REXCVAR_DEFINE_BOOL(nhl_force_host_msaa_1x, false, "GPU",
+                     "NHL performance mode: 1-sample host render targets for 2x/4x guest MSAA "
+                     "(no anti-aliasing, less GPU work); host render target path only");
++REXCVAR_DEFINE_BOOL(nhl_force_host_msaa_1x_4x, false, "GPU",
++                    "NHL performance mode: 1-sample host render targets for 4x guest MSAA targets only "
++                    "(the shadow maps and the XDK 4x clear aliases); 2x targets stay multisampled. "
++                    "Host render target path only; read at start-up. Implied by nhl_force_host_msaa_1x");
+ REXCVAR_DEFINE_BOOL(nhl_test_skip_dump, false, "GPU/Vulkan",
+                     "Test only: resolves skip the EDRAM dump and copy stale data, a ceiling for "
+                     "what resolving without the dump can gain. The picture will be wrong.")
+@@ -779,15 +783,18 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     // sources (compiled per guest sample count), so keep the host depth encoding equal to the
+     // guest one: unorm24 natively, float24 converted in the pixel shader.
+     host_msaa_1x_ = REXCVAR_GET(nhl_force_host_msaa_1x);
+-    if (host_msaa_1x_) {
++    host_msaa_1x_4x_ = !host_msaa_1x_ && REXCVAR_GET(nhl_force_host_msaa_1x_4x);
++    if (host_msaa_1x_ || host_msaa_1x_4x_) {
+       if (!depth_unorm24_vulkan_format_supported_) {
+         REXGPU_WARN(
+             "VulkanRenderTargetCache: nhl_force_host_msaa_1x needs D24S8 render targets - "
+             "disabled");
+         host_msaa_1x_ = false;
++        host_msaa_1x_4x_ = false;
+       } else {
+         depth_float24_convert_in_pixel_shader_ = true;
+-        REXGPU_INFO("VulkanRenderTargetCache: host render targets forced to 1 sample");
++        REXGPU_INFO("VulkanRenderTargetCache: host render targets forced to 1 sample%s",
++                    host_msaa_1x_ ? "" : " (4x guest targets only)");
+       }
+     }
+ 
+@@ -2029,7 +2036,7 @@ VkRenderPass VulkanRenderTargetCache::GetHostRenderTargetsRenderPass(RenderPassK
+   }
+ 
+   VkSampleCountFlagBits samples;
+-  switch (host_msaa_1x_ ? xenos::MsaaSamples::k1X : key.msaa_samples) {
++  switch (HostMsaa1x(key.msaa_samples) ? xenos::MsaaSamples::k1X : key.msaa_samples) {
+     case xenos::MsaaSamples::k1X:
+       samples = VK_SAMPLE_COUNT_1_BIT;
+       break;
+@@ -2222,7 +2229,7 @@ VkFormat VulkanRenderTargetCache::GetColorOwnershipTransferVulkanFormat(
+     *is_integer_out = true;
+   }
+   VkSampleCountFlagBits transfer_sample_count =
+-      host_msaa_1x_ ? VK_SAMPLE_COUNT_1_BIT
++      HostMsaa1x(msaa_samples) ? VK_SAMPLE_COUNT_1_BIT
+                     : VkSampleCountFlagBits(uint32_t(1) << uint32_t(msaa_samples));
+   if (transfer_sample_count == VK_SAMPLE_COUNT_2_BIT && !msaa_2x_attachments_supported_) {
+     // 2x guest color render targets are allocated as 4x host render targets in
+@@ -2336,7 +2343,7 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
+   image_create_info.extent.depth = 1;
+   image_create_info.mipLevels = 1;
+   image_create_info.arrayLayers = 1;
+-  if (host_msaa_1x_) {
++  if (HostMsaa1x(key.msaa_samples)) {
+     image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+   } else if (key.msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_attachments_supported_) {
+     image_create_info.samples = VK_SAMPLE_COUNT_4_BIT;
+@@ -2964,7 +2971,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+   // Color source.
+   // Host image sampling only - the EDRAM math below keeps using key.source_msaa_samples.
+   bool source_is_multisampled =
+-      key.source_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_;
++      key.source_msaa_samples != xenos::MsaaSamples::k1X && !HostMsaa1x(key.source_msaa_samples);
+   spv::Id source_color_texture = spv::NoResult;
+   if (pipeline_layout_info.used_descriptor_sets & kTransferUsedDescriptorSetColorTextureBit) {
+     source_color_texture = builder.createVariable(
+@@ -3043,7 +3050,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+         spv::NoPrecision, spv::StorageClassUniformConstant,
+         builder.makeImageType(type_float, spv::Dim2D, false, false,
+                               key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X &&
+-                                  !host_msaa_1x_,
++                                  !HostMsaa1x(key.host_depth_source_msaa_samples),
+                               1,
+                               spv::ImageFormatUnknown),
+         "xe_transfer_host_depth");
+@@ -3117,7 +3124,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+   spv::Id input_sample_id = spv::NoResult;
+   spv::Id spec_const_sample_id = spv::NoResult;
+   // With 1-sample host images the destination has only host sample 0.
+-  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_) {
++  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && !HostMsaa1x(key.dest_msaa_samples)) {
+     if (device_properties.sampleRateShading) {
+       // One draw for all samples.
+       builder.addCapability(spv::CapabilitySampleRateShading);
+@@ -3199,7 +3206,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+ 
+   // Load the destination sample index.
+   spv::Id dest_sample_id = spv::NoResult;
+-  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && host_msaa_1x_) {
++  if (key.dest_msaa_samples != xenos::MsaaSamples::k1X && HostMsaa1x(key.dest_msaa_samples)) {
+     dest_sample_id = builder.makeUintConstant(0);
+   } else if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
+     if (device_properties.sampleRateShading) {
+@@ -4582,7 +4589,8 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(TransferShaderKey key)
+             id_vector_temp.push_back(host_depth_source_pixel_y_int);
+             host_depth_source_texture_parameters.coords =
+                 builder.createCompositeConstruct(type_int2, id_vector_temp);
+-            if (key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_) {
++            if (key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X &&
++                !HostMsaa1x(key.host_depth_source_msaa_samples)) {
+               host_depth_source_texture_parameters.sample =
+                   builder.createUnaryOp(spv::OpBitcast, type_int, host_depth_source_sample_id);
+             } else {
+@@ -4832,7 +4840,9 @@ VkPipeline const* VulkanRenderTargetCache::GetTransferPipelines(TransferPipeline
+   }
+ 
+   uint32_t dest_sample_count =
+-      host_msaa_1x_ ? 1 : uint32_t(1) << uint32_t(key.shader_key.dest_msaa_samples);
++      HostMsaa1x(key.shader_key.dest_msaa_samples)
++          ? 1
++          : uint32_t(1) << uint32_t(key.shader_key.dest_msaa_samples);
+   bool dest_is_masked_sample = dest_sample_count > 1 && !device_properties.sampleRateShading;
+ 
+   VkPipelineShaderStageCreateInfo shader_stages[2];
+@@ -6479,7 +6489,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
+   // Color or depth source.
+   // Guest sample layout (EDRAM addressing) vs host image sampling.
+   bool source_is_guest_multisampled = key.msaa_samples != xenos::MsaaSamples::k1X;
+-  bool source_is_multisampled = source_is_guest_multisampled && !host_msaa_1x_;
++  bool source_is_multisampled = source_is_guest_multisampled && !HostMsaa1x(key.msaa_samples);
+   bool source_is_uint;
+   if (key.is_depth) {
+     source_is_uint = false;
+@@ -7431,7 +7441,7 @@ void VulkanRenderTargetCache::PrepareFusedResolve(const draw_util::ResolveInfo&
+         }
+         if (!reason) {
+           const uint32_t msaa_log2 = uint32_t(k.msaa_samples);
+-          const bool host_ms = k.msaa_samples != xenos::MsaaSamples::k1X && !host_msaa_1x_;
++          const bool host_ms = k.msaa_samples != xenos::MsaaSamples::k1X && !HostMsaa1x(k.msaa_samples);
+           VkPipeline pipeline = GetFusedPipeline(k.is_depth, msaa_log2, host_ms, nhl_full32);
+           if (pipeline == VK_NULL_HANDLE) {
+             reason = 8;

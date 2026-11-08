@@ -47,8 +47,15 @@ set(NHLLEGACY_SOURCES
     src/l2/t3db_hooks.cpp
     src/l2/penalty.cpp
     src/l2/penalty_hooks.cpp
+    src/l2/rules.cpp
+    src/l2/rules_hooks.cpp
+    src/l2/gameflow.cpp
+    src/l2/gameflow_hooks.cpp
     src/rules_hooks.cpp
+    src/scene_force.cpp
+    src/ui_rows.cpp
     src/mod_layers.cpp
+    src/roster_choice.cpp
     src/pregame_menu/menu_core.cpp
     src/pregame_menu/menu_sdl.cpp
     src/scrape_patch.cpp
@@ -139,8 +146,15 @@ set(NHLLEGACY_SOURCES
     src/l2/t3db_hooks.cpp
     src/l2/penalty.cpp
     src/l2/penalty_hooks.cpp
+    src/l2/rules.cpp
+    src/l2/rules_hooks.cpp
+    src/l2/gameflow.cpp
+    src/l2/gameflow_hooks.cpp
     src/rules_hooks.cpp
+    src/scene_force.cpp
+    src/ui_rows.cpp
     src/mod_layers.cpp
+    src/roster_choice.cpp
     src/pregame_menu/menu_core.cpp
     src/pregame_menu/menu_sdl.cpp
     src/scrape_patch.cpp
@@ -412,4 +426,10 @@ endif()
 option(NHLLEGACY_BUILD_TRACE_TOOLS "Build the offline .xtr replay tool (nhl-trace-replay)" ON)
 if(NHLLEGACY_BUILD_TRACE_TOOLS AND WIN32)
     add_subdirectory(tools/replay)
+endif()
+
+# Scene tracing wrappers (src/scene_force.cpp, env NHL_SCENE_TRACE=1): research build only, off by default
+option(NHL_SCENE_TRACE "wrap game flow/replay functions with trace logging" OFF)
+if(NHL_SCENE_TRACE)
+    set_source_files_properties(src/scene_force.cpp PROPERTIES COMPILE_DEFINITIONS NHL_SCENE_TRACE_HOOKS=1)
 endif()

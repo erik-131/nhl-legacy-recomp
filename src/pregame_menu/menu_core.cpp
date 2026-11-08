@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -44,6 +45,41 @@ const std::vector<Option>& DefaultOptions() {
           C("hold", "Only when Back is held", {{Target::Menu, "menu.show", "hold"}},
             "You will not see this screen again unless you hold Back at launch.")},
          0, false, ""});
+    add({"legal", "Start", "Legal screen",
+         "The legal text screen in the boot. Hiding it shows blank clouds; the boot is no shorter (the game loads behind it).",
+         Kind::Choice, ActionId::None,
+         {C("shown", "Shown"), C("hidden", "Hidden", {Env("REX_NHL_SKIP_LEGAL", "true")},
+            "Needs the stock logo screen file; if it differs the stock text still shows.")},
+         0, true, "docs/mods-and-tweaks.md (Legal and language screens)"});
+    add({"lang", "Start", "Language screen",
+         "Skips the language choice and keeps the default language. The boot is no shorter.",
+         Kind::Choice, ActionId::None,
+         {C("shown", "Shown"), C("hidden", "Hidden", {Env("REX_NHL_SKIP_LANGUAGE", "true")})},
+         0, true, "docs/mods-and-tweaks.md (Legal and language screens)"});
+    {  // one-shot: the player picks it for the next start only; menu_sdl resets it before saving, so it never repeats by itself
+      auto fill = [](const char* min) {
+        const int m = std::atoi(min);
+        return std::vector<Assign>{Env("NHL_VPAD_SCRIPT", FillScript(m, 1).c_str()),
+                                   Env("NHL_VPAD_EXIT_AFTER_SEC", std::to_string(m * 60).c_str()),
+                                   Env("REX_AUDIO_MUTE", "true")};
+      };
+      const std::string warn =
+          "The game plays itself with random buttons on THIS profile (menus, saves) with no sound, then closes. "
+          "Needs Boot screens = Quick start. Do not use the pad meanwhile.";
+      add({"fill", "Start", "Pre-compile shaders (once)",
+           "Fills the shader storage so play has no first-sight freezes: the game runs by itself for a while, then closes.",
+           Kind::Choice, ActionId::None,
+           {C("no", "No, just play"), C("10", "Yes, next start: 10 min", fill("10"), warn),
+            C("30", "Yes, next start: 30 min (best)", fill("30"), warn)},
+           0, true, "measured 11-06: 30 min reaches ~290 of ~400 pipelines; gaps > 50 ms in play 11-16 -> 0-1", true});
+    }
+    add({"rosters", "Start", "Rosters",
+         "Which player and team database the game starts with. Applies at the next start.",
+         Kind::Choice, ActionId::None,
+         {C("original", "Original rosters", {Ini("rosters", "")}),
+          C("2026", "2026-27 season", {Ini("rosters", "2026")},
+            "Stock team slots (Utah replaces Arizona); ratings are derived from stats. Saves made with one set may look wrong with the other.")},
+         0, true, "docs/roster-choice.md; needs mods/roster-2026/db/nhlng.db, otherwise the original is used"});
     add({"reset", "Start", "Reset everything to defaults", "Puts every option back to its default.", Kind::Action,
          ActionId::ResetAll, {}, 0, false, ""});
 
@@ -105,6 +141,11 @@ const std::vector<Option>& DefaultOptions() {
           C("2", "Monitor 2", {Ini("monitor", "2")}), C("3", "Monitor 3", {Ini("monitor", "3")})},
          0, true, ""});
 
+    add({"manual_lines", "Advanced", "Line changes",
+         "Every match starts with manual line changes for both sides. The in-game option is left alone.",
+         Kind::Choice, ActionId::None,
+         {C("game", "Game option"), C("manual", "Always manual", {Env("REX_NHL_MANUAL_LINES", "true")})},
+         0, true, "docs/line-change.md; read per call, so it applies from the first match"});
     add({"transfers", "Advanced", "Skip pointless render-target copies",
          "Skip EDRAM transfers into areas the next draw overwrites.", Kind::Choice, ActionId::None,
          {C("on", "On", {Env("REX_NHL_RT_SKIP_OVERWRITTEN_TRANSFERS", "true")}),
@@ -127,6 +168,26 @@ const std::vector<Option>& DefaultOptions() {
     return o;
   }();
   return kOpts;
+}
+
+std::string FillScript(int minutes, uint32_t seed) {
+  if (minutes < 1) return "";
+  static const char* const kBtn[] = {"a", "a", "a", "a", "a", "a", "a", "a", "start", "b", "b", "up", "down", "left", "right",
+                                     "up", "down", "left", "right", "lb", "rb"};
+  static const double kGap[] = {0.8, 1.2, 1.6, 2.4};
+  static const int kHold[] = {100, 150, 250};
+  uint32_t st = seed * 2654435761u + 12345u;
+  auto rnd = [&](uint32_t n) { st = st * 1664525u + 1013904223u; return (st >> 8) % n; };
+  // quick start through the boot (3x boot clock, short movie), same times as nhl_fill.sh
+  std::string s = "14:a:120,16:a:120,18:a:120,20:a:120,22:a:120,24:a:120,28:start:120";
+  const double end = double(minutes) * 60.0 - 20.0;
+  char buf[64];
+  for (double t = 34.0; t < end;) {
+    std::snprintf(buf, sizeof buf, ",%.1f:%s:%d", t, kBtn[rnd(21)], kHold[rnd(3)]);
+    s += buf;
+    t += kGap[rnd(4)];
+  }
+  return s;
 }
 
 std::vector<std::string> PageNames(const std::vector<Option>& opts) {
@@ -153,6 +214,11 @@ void Settings::SetIndex(const Option& o, int idx) {
 }
 
 void Settings::ResetAll() { values_.clear(); }
+
+void Settings::ResetOneShots() {
+  for (const auto& o : *opts_)
+    if (o.oneshot) values_.erase(o.id);
+}
 
 int Settings::ParseText(const std::string& text) {
   values_.clear();

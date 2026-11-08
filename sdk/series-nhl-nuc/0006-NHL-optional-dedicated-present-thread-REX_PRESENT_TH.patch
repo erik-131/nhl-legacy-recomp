@@ -1,7 +1,7 @@
 From d0fd65f7bdba51dd889aa81287b12fca7f349954 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Fri, 30 Oct 2026 19:08:33 +0100
-Subject: [PATCH 06/41] NHL: optional dedicated present thread
+Subject: [PATCH 06/42] NHL: optional dedicated present thread
  (REX_PRESENT_THREAD=1)
 
 ---

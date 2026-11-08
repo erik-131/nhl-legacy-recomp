@@ -1,7 +1,7 @@
 From 3895a5de9033d97e7a9489a280fbc18853ed3b4d Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 13:38:17 +0100
-Subject: [PATCH 35/41] audio: [nhl-audio-stats] once a second, silence
+Subject: [PATCH 35/42] audio: [nhl-audio-stats] once a second, silence
  inserted and callback gaps
 
 ---

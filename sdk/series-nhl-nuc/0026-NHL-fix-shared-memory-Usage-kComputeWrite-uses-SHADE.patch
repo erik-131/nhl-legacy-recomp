@@ -1,7 +1,7 @@
 From 515cc90330a5f5775a9844fe3b36293c3544771c Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Wed, 4 Nov 2026 23:11:31 +0100
-Subject: [PATCH 26/41] NHL fix: shared memory Usage::kComputeWrite uses
+Subject: [PATCH 26/42] NHL fix: shared memory Usage::kComputeWrite uses
  SHADER_WRITE access (was SHADER_READ)
 
 Resolve compute writes to shared memory were never made available by the barrier that follows them.

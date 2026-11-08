@@ -171,7 +171,7 @@ void WalkMod(const fs::path& dir, const std::string& rel_prefix, size_t depth,
 
 }  // namespace
 
-ModIndex ModIndex::Scan(const fs::path& root, const LogFn& log) {
+ModIndex ModIndex::Scan(const fs::path& root, const LogFn& log, const std::vector<std::string>& force_disabled) {
   ModIndex idx;
   try {
     std::error_code ec;
@@ -225,6 +225,9 @@ ModIndex ModIndex::Scan(const fs::path& root, const LogFn& log) {
       if (std::find(lo.disabled.begin(), lo.disabled.end(), lid) != lo.disabled.end()) {
         c.info.enabled = false;
         c.info.disabled_by = "load_order.txt";
+      }
+      for (const auto& f : force_disabled) {
+        if (LowerStr(f) == lid) { c.info.enabled = false; c.info.disabled_by = "not selected"; }
       }
     }
     // cands is alphabetical (sorted above), stable_sort keeps that for unknowns

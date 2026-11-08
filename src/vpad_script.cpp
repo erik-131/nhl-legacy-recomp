@@ -6,11 +6,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <rex/logging.h>
 
@@ -24,6 +29,7 @@ struct Press {
   unsigned at_ms = 0;
   SDL_GamepadButton button = SDL_GAMEPAD_BUTTON_SOUTH;
   unsigned hold_ms = 150;
+  int trigger = -1;  // raw joystick axis (2 = LT, 5 = RT of the 360 layout) for the names lt/rt (analog, pressed to full)
 };
 
 SDL_GamepadButton ButtonByName(const std::string& n) {
@@ -69,7 +75,10 @@ std::vector<Press> ParseScript(const char* spec, bool frame_based) {
           p.hold_ms = static_cast<unsigned>(std::strtoul(item.substr(c2 + 1).c_str(), nullptr, 10));
         }
         p.button = ButtonByName(name);
-        if (p.button != SDL_GAMEPAD_BUTTON_INVALID) out.push_back(p);
+        if (name == "lt" || name == "rt") {
+          p.trigger = name == "lt" ? 2 : 5;  // raw axes of the Xbox 360 mapping
+          out.push_back(p);
+        } else if (p.button != SDL_GAMEPAD_BUTTON_INVALID) out.push_back(p);
         else REXLOG_WARN("[nhl-vpad] unknown button '{}'", name);
       }
     }
@@ -83,6 +92,24 @@ std::vector<Press> ParseScript(const char* spec, bool frame_based) {
 }  // namespace
 
 void StartVpadScript() {
+  // NHL_VPAD_EXIT_AFTER_SEC=<n>: end the process n seconds from now (the shader-fill run of the pre-game menu; same as
+  // `timeout` in tools/nuc/ct105/nhl_fill.sh). The pipeline storage is flushed as it grows, so a hard exit loses nothing.
+  if (const char* ex = std::getenv("NHL_VPAD_EXIT_AFTER_SEC")) {
+    const long sec = std::strtol(ex, nullptr, 10);
+    if (sec > 0) {
+      REXLOG_INFO("[nhl-vpad] will exit after {} s (shader fill run)", sec);
+      std::thread([sec]() {
+        std::this_thread::sleep_for(std::chrono::seconds(sec));
+        REXLOG_INFO("[nhl-vpad] NHL_VPAD_EXIT_AFTER_SEC reached: exiting");
+        std::fflush(nullptr);
+#ifdef _WIN32
+        std::_Exit(0);
+#else
+        ::_exit(0);
+#endif
+      }).detach();
+    }
+  }
   // NHL_VPAD_SCRIPT_FRAMES uses GUEST FRAME indices instead of seconds. The
   // wall-clock form makes runs diverge: if two runs render at different speeds
   // the presses land on different guest frames, so the simulation goes a
@@ -145,13 +172,15 @@ void StartVpadScript() {
         std::this_thread::sleep_for(std::chrono::milliseconds(p.at_ms - now_ms));
         now_ms = p.at_ms;
       }
-      SDL_SetJoystickVirtualButton(js, p.button, true);
+      if (p.trigger >= 0) SDL_SetJoystickVirtualAxis(js, p.trigger, 32767);
+      else SDL_SetJoystickVirtualButton(js, p.button, true);
       nhl::graphics::MarkInputPress();
       std::this_thread::sleep_for(std::chrono::milliseconds(p.hold_ms));
-      SDL_SetJoystickVirtualButton(js, p.button, false);
+      if (p.trigger >= 0) SDL_SetJoystickVirtualAxis(js, p.trigger, 0);
+      else SDL_SetJoystickVirtualButton(js, p.button, false);
       now_ms += p.hold_ms;
       REXLOG_INFO("[nhl-vpad] at={} pressed {} for {}ms (guest frame {})", p.at_ms,
-                  SDL_GetGamepadStringForButton(p.button), p.hold_ms,
+                  p.trigger >= 0 ? "trigger" : SDL_GetGamepadStringForButton(p.button), p.hold_ms,
                   nhl::graphics::ReadVkFrameIndex());
     }
     REXLOG_INFO("[nhl-vpad] script complete; pad stays attached");

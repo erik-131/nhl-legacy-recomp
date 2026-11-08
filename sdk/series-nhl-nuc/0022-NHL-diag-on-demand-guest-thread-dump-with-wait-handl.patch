@@ -1,7 +1,7 @@
 From c0568805e6c55798ad1227545ab023cd9e141115 Mon Sep 17 00:00:00 2001
 From: nhl <nhl@localhost>
 Date: Sat, 31 Oct 2026 05:04:23 +0100
-Subject: [PATCH 22/41] NHL diag: on-demand guest thread dump with wait handles
+Subject: [PATCH 22/42] NHL diag: on-demand guest thread dump with wait handles
  + guest call chains (NHL_STALL_DUMP_FILE)
 
 ---

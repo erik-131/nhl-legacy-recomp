@@ -1,7 +1,7 @@
 From 09dad274b550ddf4375d2563cf68058e4327cd74 Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Fri, 6 Nov 2026 20:23:55 +0100
-Subject: [PATCH 39/41] vulkan: SPIR-V optimizer experiment uses the universal
+Subject: [PATCH 39/42] vulkan: SPIR-V optimizer experiment uses the universal
  environment, logs failures
 
 ---

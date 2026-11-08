@@ -733,3 +733,23 @@ In the replay every draw is eligible (`[nhl-gather]` log: mag_lin=0 min_lin=0 an
 **Result**, in-process A/B (`NHL_AB_TOGGLE`), replay, implicit LOD off (the Grad path): median 61.6->62.6, 57.9->59.3, 61.4->62.7, 61.6->62.8 (**+1.6 / +2.4 / +2.1 / +1.9 %**, p5 +1.0, +0.1, +0.9, +1.3); profiled draw ms 11.66 -> 10.78 (one run).
 With `nhl_ps_implicit_lod` on in both phases: 62.1->62.3, 63.8->64.0, 61.9->62.1 (+0.3 %), profiled draw 9.28 -> 9.22: **the gain is gone because the taps were only expensive as `sample_d`; as `sample_b` the 16 nearest taps cost little**. Live (150 s, 3 repeats, off): median 109.6->108.7, 110.1->110.7, 109.0->107.6 (noise), p5 +2.7, +0.5, +2.4.
 **Picture** (replay frame, 4 shots/run, A/A 126v146 vs A/B 126v136): A/A 1.185, A/B 1.196 / 1.194 / 1.207 mean abs diff, pixels>8 1557 v 1571-2186: identical within noise. **Verdict:** correct and safe but not worth enabling next to implicit LOD; the shadow filter is no longer the bottleneck. Remaining 4C28 cost is the ~10 material fetches and ALU. Cvar stays default off; could be deleted.
+
+## Stacked picture-identical GPU wins (`NHL_FAST`, 2026-11-07/08)
+
+The launcher `tools/nuc/ct105/nhl_play.sh` turns this set on unless `NHL_FAST=0` (each cvar can also be turned off alone):
+`nhl_texture_unsigned_spec`, `nhl_register_vars`, `nhl_direct_resolve_fused`, `nhl_readback_batch`, `nhl_readback_skip_depth`,
+`nhl_rt_clear_through` (+ depth, with the two clear shader hashes), `nhl_ps_implicit_lod`, `anisotropic_override=0`, and the
+vertex-shader pair `nhl_vs_texture_unsigned_spec` + `nhl_fast_vertex_math` (SDK patch 0042). The binary defaults stay off.
+
+- **Dev snapshot, nine cvars on vs off, 3 interleaved repeats** (paused replay pooled): min 50.8 -> 71.4, p5 51.6 -> 72.8, median
+  53.8 -> 75.7 fps (**+40 %**). Quick route, full-length runs: min 45.7 -> 69.6, p5 60.6 -> 105.5, median 103.1 -> 128.2, seconds at
+  or above 100 fps 76 -> 95 %.
+- **Installed build, GPU power-limited (clocks 1350-1600 MHz), interleaved:** quick route median 83.8/83.2/84.4 (p5 44-42) without,
+  101.7/104.4/104.3 (p5 58.5/60.8/70.8) with: **+24 % median, p5 about +20 fps**. Paused replay 51.8/47.1/55.1 -> 70.2/72.7/74.3 (**+40 %**).
+- **Picture:** in-process A/B of all nine cvars on three paused-replay scenes: mean abs difference per channel 1.18-1.22 between
+  A and B, the same as B against B (temporal noise about 1.17). No visible difference.
+- **Streaming (Moonlight client attached, synthetic session, 1080p60 encode):** replay median 64 with the set against 48 without; the
+  encoder and client cost a few percent (-4 % in an earlier pair).
+- **Limits:** one machine, GPU clocks varied 10-15 % between runs, replays and close-ups are still far below 100 fps; 11 of 12 quick
+  runs with the set ran to the end with a clean shutdown, one was killed by the harness timeout with no log kept (cause unknown, not
+  seen again in two reruns).

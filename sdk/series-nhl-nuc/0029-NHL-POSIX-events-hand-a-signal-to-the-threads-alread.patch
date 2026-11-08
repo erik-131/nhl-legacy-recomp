@@ -1,7 +1,7 @@
 From 682c42ea72df32016e4f1881f253ec1127dc7acd Mon Sep 17 00:00:00 2001
 From: Erik <erik-131@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 18:28:37 +0100
-Subject: [PATCH 29/41] NHL: POSIX events hand a signal to the threads already
+Subject: [PATCH 29/42] NHL: POSIX events hand a signal to the threads already
  waiting; SignalAndWait registers the wait first
 
 Waiters queue on the event: an auto-reset signal goes to the oldest waiter, a manual-reset set releases all of

@@ -30,6 +30,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#ifndef _WIN32
+#include <execinfo.h>
+#include <dlfcn.h>
+#endif
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -68,6 +72,8 @@ static std::atomic<uint8_t*> g_guest_base{nullptr};
 // thread's guest context to nullcall_ctx.txt. lr = guest return address of the
 // offending bctrl/branch; last_indirect_target = the unregistered callee.
 // (lldb can't usefully attach to the 124MB exe, so this is the crash tool.)
+static bool SafeGuestLoadU32(uint8_t* base, uint32_t guest_addr, uint32_t* out);
+
 static void AbortContextTap(int) {
   auto* ts = rex::runtime::ThreadState::Get();
   if (ts && ts->context()) {
@@ -80,6 +86,48 @@ static void AbortContextTap(int) {
                    static_cast<unsigned long long>(c->lr),
                    c->last_indirect_target, c->r3.u32, c->r4.u32, c->r29.u32,
                    c->r30.u32, c->r31.u32);
+      // Extended dump (crash-nullcall investigation, docs/crash-nullcall.md).
+      std::fprintf(f, "ctr=%08X r1=%08X r2=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X r12=%08X r13=%08X\n",
+                   c->ctr.u32, c->r1.u32, c->r2.u32, c->r5.u32, c->r6.u32, c->r7.u32,
+                   c->r8.u32, c->r9.u32, c->r10.u32, c->r11.u32, c->r12.u32, c->r13.u32);
+      std::fprintf(f, "r14=%08X r15=%08X r16=%08X r17=%08X r18=%08X r19=%08X r20=%08X r21=%08X r22=%08X r23=%08X r24=%08X r25=%08X r26=%08X r27=%08X r28=%08X\n",
+                   c->r14.u32, c->r15.u32, c->r16.u32, c->r17.u32, c->r18.u32, c->r19.u32,
+                   c->r20.u32, c->r21.u32, c->r22.u32, c->r23.u32, c->r24.u32, c->r25.u32,
+                   c->r26.u32, c->r27.u32, c->r28.u32);
+      uint8_t* gb = g_guest_base.load();
+      if (gb) {
+        std::fprintf(f, "guest stack (r1=%08X), code-like words:\n", c->r1.u32);
+        for (uint32_t off = 0; off < 0x800; off += 4) {
+          uint32_t w = 0;
+          if (!SafeGuestLoadU32(gb, c->r1.u32 + off, &w)) break;
+          if (w >= 0x82000000u && w < 0x84000000u)
+            std::fprintf(f, "  r1+%03X = %08X\n", off, w);
+        }
+        auto dump = [&](const char* nm, uint32_t a) {
+          if (a < 0x10000) return;
+          std::fprintf(f, "%s=%08X:", nm, a);
+          for (uint32_t i = 0; i < 16; i++) {
+            uint32_t w = 0;
+            if (!SafeGuestLoadU32(gb, a + i * 4, &w)) { std::fprintf(f, " ??"); break; }
+            std::fprintf(f, " %08X", w);
+          }
+          std::fprintf(f, "\n");
+        };
+        dump("r3", c->r3.u32); dump("r4", c->r4.u32); dump("r29", c->r29.u32);
+        dump("r30", c->r30.u32); dump("r31", c->r31.u32);
+      }
+#ifndef _WIN32
+      void* bt[64];
+      int n = backtrace(bt, 64);
+      std::fprintf(f, "host backtrace (%d frames)\n", n);
+      for (int i = 0; i < n; i++) {
+        Dl_info d{};
+        dladdr(bt[i], &d);
+        std::fprintf(f, "  #%d %p %s+%#zx (%s base %p)\n", i, bt[i], d.dli_sname ? d.dli_sname : "?",
+                     d.dli_saddr ? (size_t)((char*)bt[i] - (char*)d.dli_saddr) : (size_t)0,
+                     d.dli_fname ? d.dli_fname : "?", d.dli_fbase);
+      }
+#endif
       std::fclose(f);
     }
   }
@@ -517,6 +565,7 @@ extern "C" REX_FUNC(sub_8277CC98) {
   }
   const uint32_t r4 = ctx.r4.u32, r5 = ctx.r5.u32, r6 = ctx.r6.u32,
                  r7 = ctx.r7.u32, r8 = ctx.r8.u32, r9 = ctx.r9.u32;
+  const uint32_t caller_lr = static_cast<uint32_t>(ctx.lr);
   __imp__sub_8277CC98(ctx, base);
   int n = g_pub2_n.fetch_add(1);
   uint32_t desc[24] = {};
@@ -542,7 +591,14 @@ extern "C" REX_FUNC(sub_8277CC98) {
       return ga ? base + ga + REX_PHYS_HOST_OFFSET(ga) : nullptr;
     };
     Vp6BridgePublish(r9, host(desc[4]), host(desc[5]), host(desc[6]), r6, r7, yp,
-                     cp);
+                     cp, caller_lr, desc, host(desc[7]), desc[11]);
+  }
+  else if (bridge_on) {
+    static std::atomic<int> small_n{0};
+    if (small_n.fetch_add(1) < 50) {
+      FILE* f = std::fopen("vp6_bridge.txt", "a");
+      if (f) { std::fprintf(f, "small publish ring=%08X %ux%u (not bridged)\n", r9, r6, r7); std::fclose(f); }
+    }
   }
   if (pat_on && r6 >= 320 && r7 >= 180) {
     // Overwrite the published Y plane (desc[4] per +16) with a gradient and
