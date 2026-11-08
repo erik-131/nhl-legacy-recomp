@@ -18,15 +18,14 @@ consulted; the first roster runs therefore always got the stock DB (the `[db-ope
 file of a mod that exists in `_compiled` is served for relative and absolute opens. Mod files that do not exist in `_compiled` are
 still served only by absolute path (unchanged).
 
-## Evidence (private install nhl-rc, quick route, bq jobs 00358 original / 00359 2026 / 00360 menu)
-- `[db-open] ... <- .../game/_compiled/db/nhlng.db` (original) v `<- .../mods/roster-2026/db/nhlng.db (mod)` (2026).
-- Faceoff line cards at 49 s: original `M. BOEDKER / M. HANZAL / S. DOAN` v `P. MAROON / R. GETZLAF / C. PERRY`; 2026
-  `L. CROUSE / N. SCHMALTZ / C. KELLER` v `C. GAUTHIER / L. CARLSSON / T. TERRY`, and #91 Carlsson in the faceoff close-up
-  (`nhl-work/rc-proof-original-lineup.png`, `rc-proof-2026-lineup.png`).
-- Menu end to end (job 00360): scripted menu on the Start tab, 5 x down, right -> row shows `*2026-27 season` with the
-  "Takes effect when the game starts" note (`rc-proof-menu-row.png`); START wrote `rosters=2026` to `nhl_enhancements.ini` and the
-  same run served the mod DB (131 `(mod)` opens).
-- Shmem during the runs (mon/rec-2026-11-08.csv): 52-1616 MB, flat, no growth.
+## What was checked
+Quick route, original and 2026 set, plus the menu path:
+- The log shows which database was opened: `[db-open] ... <- .../game/_compiled/db/nhlng.db` (original) v `<- .../mods/roster-2026/db/nhlng.db (mod)` (2026).
+- Faceoff line cards at 49 s differ between the two sets (original `M. BOEDKER / M. HANZAL / S. DOAN` v `P. MAROON / R. GETZLAF / C. PERRY`; 2026
+  `L. CROUSE / N. SCHMALTZ / C. KELLER` v `C. GAUTHIER / L. CARLSSON / T. TERRY`), and #91 Carlsson shows in the faceoff close-up.
+- Menu end to end: on the Start tab, 5 x down, right -> the row shows `*2026-27 season` with the "Takes effect when the game
+  starts" note; START wrote `rosters=2026` to `nhl_enhancements.ini` and the same run served the mod DB (131 `(mod)` opens).
+- Shared memory during the runs stayed flat (52-1616 MB), no growth.
 
 ## Where the choice is stored
 1. env `NHL_ROSTERS=<name>` (launcher / dev run; wins)
